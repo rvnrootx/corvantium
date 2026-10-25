@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Hyprland Corvantium
+Comment=Corvantium field desktop by RVNROOTX
+Exec=@SESSION_EXEC@
+Type=Application
+X-KDE-PluginInfo-Name=hyprland-corvantium

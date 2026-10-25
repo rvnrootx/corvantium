@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+notice() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name=Corvantium Corvantium "$1" || true
+    else
+        printf 'Corvantium: %s\n' "$1" >&2
+    fi
+}
+configured_app() {
+    local key="$1" config="${CORVANTIUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/corvantium}/shell/settings.json" selected path
+    selected="$(python3 - "$config" "$key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    settings = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    applications = settings.get("applications", {}) if isinstance(settings, dict) else {}
+    selected = applications.get(sys.argv[2], "") if isinstance(applications, dict) else ""
+    if isinstance(selected, str):
+        print(selected.strip())
+except (OSError, ValueError, TypeError):
+    pass
+PY
+)"
+    if [[ -n "$selected" ]]; then
+        path="$(command -v -- "$selected" 2>/dev/null || true)"
+        if [[ -n "$path" && -f "$path" && -x "$path" ]]; then printf '%s\n' "$path"; return 0; fi
+        notice "Configured $key '$selected' was not found; trying installed alternatives."
+    fi
+    shift
+    pick "$@"
+}
+pick() {
+    local candidate path
+    for candidate in "$@"; do
+        path="$(command -v "$candidate" 2>/dev/null || true)"
+        if [[ -n "$path" ]]; then printf '%s\n' "$path"; return 0; fi
+    done
+    return 1
+}
+
+case "${1:-}" in
+    search)
+        app="$(configured_app launcher fuzzel wofi rofi || true)"
+        case "${app##*/}" in
+            "") notice 'Install fuzzel, wofi, or rofi for application search.' ;;
+            fuzzel) exec "$app" ;;
+            wofi) exec "$app" --show drun ;;
+            rofi) exec "$app" -show drun ;;
+            *) exec "$app" ;;
+        esac
+        ;;
+    files)
+        app="$(configured_app file_manager dolphin thunar nautilus nemo pcmanfm-qt pcmanfm || true)"
+        if [[ -n "$app" ]]; then exec "$app" "$HOME"; fi
+        notice 'No supported file manager was found.'
+        ;;
+    terminal)
+        app="$(configured_app terminal kitty foot ghostty alacritty wezterm konsole || true)"
+        if [[ -n "$app" ]]; then exec "$app"; fi
+        notice 'No supported terminal was found.'
+        ;;
+    effects)
+        app="$(pick easyeffects || true)"
+        if [[ -n "$app" ]]; then exec "$app"; fi
+        notice 'EasyEffects is not installed. Corvantium leaves system equalization unchanged.'
+        ;;
+    logout)
+        if command -v hyprshutdown >/dev/null 2>&1; then exec hyprshutdown; fi
+        if command -v hyprctl >/dev/null 2>&1; then exec hyprctl dispatch exit; fi
+        notice 'Could not find hyprshutdown or hyprctl to end the Corvantium session.'
+        exit 1
+        ;;
+    browser)
+        shift
+        app="$(configured_app browser xdg-open || true)"
+        if [[ -n "$app" && -n "${1:-}" ]]; then exec "$app" "$1"; fi
+        notice 'No browser opener was available.'
+        ;;
+    *)
+        notice 'Unknown launch action.'
+        exit 2
+        ;;
+esac

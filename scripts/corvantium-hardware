@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-status}"
+
+case "$action" in
+    brightness-up|brightness-down)
+        if ! command -v brightnessctl >/dev/null 2>&1 || ! brightnessctl -l 2>/dev/null | grep -q 'backlight'; then
+            [[ "$action" == status ]] && printf '%s\n' 'unsupported: no backlight device'
+            exit 0
+        fi
+        if [[ "$action" == brightness-up ]]; then
+            brightnessctl --class=backlight set 5%+ >/dev/null 2>&1 || true
+        else
+            brightnessctl --class=backlight set 5%- >/dev/null 2>&1 || true
+        fi
+        ;;
+    camera-status|camera-toggle)
+        if ! command -v v4l2-ctl >/dev/null 2>&1; then
+            [[ "$action" == camera-status ]] && printf '%s\n' 'unsupported: v4l2-ctl is unavailable'
+            exit 0
+        fi
+        found=0
+        shopt -s nullglob
+        for node in /dev/video*; do
+            controls="$(v4l2-ctl --device="$node" --list-ctrls 2>/dev/null || true)"
+            if ! grep -Eq '(^|[[:space:]])privacy[[:space:]]' <<<"$controls"; then continue; fi
+            found=1
+            state="$(v4l2-ctl --device="$node" --get-ctrl=privacy 2>/dev/null || true)"
+            value="${state##*privacy: }"
+            if [[ "$action" == camera-status ]]; then printf '%s %s\n' "$node" "$value"; continue; fi
+            if [[ "$value" == 1 ]]; then next=0; else next=1; fi
+            v4l2-ctl --device="$node" --set-ctrl="privacy=$next" >/dev/null 2>&1 || {
+                command -v notify-send >/dev/null 2>&1 && notify-send Corvantium "Could not change camera privacy on $node." || true
+                continue
+            }
+            command -v notify-send >/dev/null 2>&1 && notify-send Corvantium "V4L2 privacy control set on $node." || true
+            break
+        done
+        if (( found == 0 )); then
+            [[ "$action" == camera-status ]] && printf '%s\n' 'unsupported: no V4L2 privacy control reported'
+            [[ "$action" == camera-toggle ]] && command -v notify-send >/dev/null 2>&1 && notify-send Corvantium 'No supported physical privacy control was found.' || true
+        fi
+        ;;
+    *) printf 'Unknown hardware action: %s\n' "$action" >&2; exit 2 ;;
+esac

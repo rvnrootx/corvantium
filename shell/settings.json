@@ -1,0 +1,13 @@
+{
+  "weather_location": "",
+  "temperature_unit": "celsius",
+  "time_format": "24h",
+  "weather_refresh_minutes": 30,
+  "show_weather": true,
+  "applications": {
+    "launcher": "",
+    "terminal": "",
+    "file_manager": "",
+    "browser": ""
+  }
+}
