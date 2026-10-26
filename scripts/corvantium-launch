@@ -53,6 +53,66 @@ case "${1:-}" in
             *) exec "$app" ;;
         esac
         ;;
+    screen-search)
+        for binary in slurp grim tesseract python3; do
+            command -v "$binary" >/dev/null 2>&1 || { notice "Screen search needs $binary."; exit 1; }
+        done
+        region="$(slurp 2>/dev/null)" || exit 0
+        [[ -n "$region" ]] || exit 0
+        image="$(mktemp --suffix=.png "${TMPDIR:-/tmp}/corvantium-screen-XXXXXX")"
+        grim -g "$region" "$image" || { notice 'Could not capture the selected screen region.'; exit 1; }
+        text="$(tesseract "$image" stdout 2>/dev/null | python3 -c 'import sys; print(" ".join(sys.stdin.read().split()))')"
+        rm -f -- "$image"
+        [[ -n "$text" ]] || { notice 'No readable text found in that region.'; exit 1; }
+        url="$(python3 -c 'import sys, urllib.parse; print("https://www.google.com/search?q=" + urllib.parse.quote_plus(sys.argv[1]))' "$text")"
+        command -v xdg-open >/dev/null 2>&1 || { notice 'Install xdg-utils to open the search in your default browser.'; exit 1; }
+        exec xdg-open "$url"
+        ;;
+    music-identify)
+        exec "${CORVANTIUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/corvantium}/scripts/corvantium-music-recognize"
+        ;;
+    screen-ocr)
+        for binary in slurp grim tesseract wl-copy; do
+            command -v "$binary" >/dev/null 2>&1 || { notice "Screen text copy needs $binary."; exit 1; }
+        done
+        region="$(slurp 2>/dev/null)" || exit 0
+        [[ -n "$region" ]] || exit 0
+        image="$(mktemp --suffix=.png "${TMPDIR:-/tmp}/corvantium-ocr-XXXXXX")"
+        trap 'rm -f -- "$image"' EXIT
+        grim -g "$region" "$image" || { notice 'Could not capture the selected screen region.'; exit 1; }
+        text="$(tesseract "$image" stdout 2>/dev/null | python3 -c 'import sys; print(" ".join(sys.stdin.read().split()))')"
+        [[ -n "$text" ]] || { notice 'No readable text found in that region.'; exit 1; }
+        printf '%s' "$text" | wl-copy
+        notice 'Selected screen text copied to the clipboard.'
+        ;;
+    screen-screenshot)
+        for binary in slurp grim wl-copy; do
+            command -v "$binary" >/dev/null 2>&1 || { notice "Region screenshot needs $binary."; exit 1; }
+        done
+        region="$(slurp 2>/dev/null)" || exit 0
+        [[ -n "$region" ]] || exit 0
+        grim -g "$region" - | wl-copy --type image/png
+        notice 'Selected screen region copied to the clipboard.'
+        ;;
+    clipboard)
+        command -v cliphist >/dev/null 2>&1 || { notice 'Clipboard history needs cliphist.'; exit 1; }
+        command -v wl-copy >/dev/null 2>&1 || { notice 'Clipboard history needs wl-copy.'; exit 1; }
+        if command -v fuzzel >/dev/null 2>&1; then
+            selected="$(cliphist list | fuzzel --dmenu --prompt='Clipboard  ›  ')" || exit 0
+        elif command -v wofi >/dev/null 2>&1; then
+            selected="$(cliphist list | wofi --dmenu --prompt='Clipboard history')" || exit 0
+        else
+            notice 'Clipboard history needs fuzzel or wofi.'; exit 1
+        fi
+        [[ -n "$selected" ]] && printf '%s\n' "$selected" | cliphist decode | wl-copy
+        ;;
+    keybinds)
+        if command -v fuzzel >/dev/null 2>&1; then
+            printf '%s\n' 'Super tap  · Application search' 'Super + Enter  · Terminal' 'Super + G / Tab  · Quick overlay' 'Super + /  · Keybind list' 'Super + Shift + A  · Circle to Search selected region' 'Super + Shift + X  · Copy text from screen region' 'Super + Shift + G  · Recognize music from audio' 'Super + E / W  · File manager / browser' 'Super + Q  · Close focused window' 'Super + D / F  · Maximize / fullscreen' 'Super + Alt + Space  · Toggle floating' 'Super + arrows  · Focus window' 'Super + Shift + arrows  · Move window' 'Super + 1–0  · Switch workspaces' 'Super + Shift + 1–0  · Move window to workspace' 'Super + Ctrl + arrows  · Change workspace' 'Super + Shift + M  · Mute audio' 'Ctrl + Alt + Delete  · Log out' 'Media keys  · Playback and volume' | fuzzel --dmenu --prompt='Corvantium keys  ›  '
+        elif command -v wofi >/dev/null 2>&1; then
+            printf '%s\n' 'Super tap  · Application search' 'Super + Enter  · Terminal' 'Super + G / Tab  · Quick overlay' 'Super + /  · Keybind list' 'Super + Shift + A  · Circle to Search selected region' 'Super + Shift + X  · Copy text from screen region' 'Super + Shift + G  · Recognize music from audio' 'Super + E / W  · File manager / browser' 'Super + Q  · Close focused window' 'Super + D / F  · Maximize / fullscreen' 'Super + Alt + Space  · Toggle floating' 'Super + arrows  · Focus window' 'Super + Shift + arrows  · Move window' 'Super + 1–0  · Switch workspaces' 'Super + Shift + 1–0  · Move window to workspace' 'Super + Ctrl + arrows  · Change workspace' 'Super + Shift + M  · Mute audio' 'Ctrl + Alt + Delete  · Log out' 'Media keys  · Playback and volume' | wofi --dmenu --prompt='Corvantium keybindings'
+        else notice 'Install fuzzel or wofi to view the keybinding list.'; fi
+        ;;
     files)
         app="$(configured_app file_manager dolphin thunar nautilus nemo pcmanfm-qt pcmanfm || true)"
         if [[ -n "$app" ]]; then exec "$app" "$HOME"; fi
@@ -78,6 +138,7 @@ case "${1:-}" in
         shift
         app="$(configured_app browser xdg-open || true)"
         if [[ -n "$app" && -n "${1:-}" ]]; then exec "$app" "$1"; fi
+        if [[ -z "${1:-}" ]]; then exec xdg-open about:blank; fi
         notice 'No browser opener was available.'
         ;;
     *)

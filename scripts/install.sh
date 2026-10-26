@@ -32,7 +32,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_root="$(cd -- "$script_dir/.." && pwd -P)"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-config_root="$config_home/corvantium"
+if [[ -r "$config_home/hyprland/main.lua" ]]; then
+    config_root="$config_home"
+else
+    config_root="$config_home/corvantium"
+fi
 bin_root="${XDG_BIN_HOME:-$HOME/.local/bin}"
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/corvantium"
 manifest="$state_root/managed-files"
@@ -49,6 +53,7 @@ sources=(
     scripts/corvantium-session
     scripts/corvantium-launch
     scripts/corvantium-hardware
+    scripts/corvantium-music-recognize
 )
 destinations=(
     "$config_root/hyprland/main.lua"
@@ -60,8 +65,9 @@ destinations=(
     "$config_root/scripts/corvantium-session"
     "$config_root/scripts/corvantium-launch"
     "$config_root/scripts/corvantium-hardware"
+    "$config_root/scripts/corvantium-music-recognize"
 )
-binaries=(corvantium-session corvantium-launch corvantium-hardware)
+binaries=(corvantium-session corvantium-launch corvantium-hardware corvantium-music-recognize)
 
 confirm() {
     local prompt="$1" answer
@@ -114,7 +120,7 @@ preflight() {
         return 1
     fi
     printf 'Preflight passed: Hyprland %s, Quickshell %s, Python %s.\n' "$version" "$qs_version" "$(python3 --version 2>&1)"
-    for binary in wpctl playerctl brightnessctl v4l2-ctl fuzzel wofi; do
+    for binary in wpctl playerctl brightnessctl v4l2-ctl fuzzel wofi songrec pactl slurp grim tesseract wl-copy; do
         command -v "$binary" >/dev/null 2>&1 || printf 'Optional capability not found: %s\n' "$binary"
     done
 }
@@ -135,7 +141,7 @@ install_user_files() {
             elif [[ ! -e "$original/$rel" && ! -L "$original/$rel" ]]; then backup_exact "$dest" "$rel" "$original"; fi
         fi
         install -D -m 0644 -- "$src" "$dest"
-        case "$(basename -- "$dest")" in corvantium-session|corvantium-launch|corvantium-hardware) chmod 0755 "$dest" ;; esac
+        case "$(basename -- "$dest")" in corvantium-session|corvantium-launch|corvantium-hardware|corvantium-music-recognize) chmod 0755 "$dest" ;; esac
         grep -Fxq -- "$dest" "$manifest" || printf '%s\n' "$dest" >> "$manifest"
     done
     for name in "${binaries[@]}"; do
@@ -153,15 +159,20 @@ install_user_files() {
 }
 
 desktop_exec_value() {
-    python3 - "$bin_root/corvantium-session" <<'PY'
-import sys
-path = sys.argv[1]
-print('"' + path.replace('\\', '\\\\').replace('"', '\\"') + '"')
-PY
+    local executable="$bin_root/corvantium-session"
+    if [[ "$executable" == *[[:space:]]* ]]; then
+        printf 'Session executable path contains whitespace, which this SDDM entry cannot safely launch: %s\n' "$executable" >&2
+        return 1
+    fi
+    printf '%s\n' "$executable"
 }
 
 register_session_now() {
     [[ -x "$bin_root/corvantium-session" ]] || { printf 'Install user files first (--install).\n' >&2; return 1; }
+    [[ -r "$config_root/hyprland/main.lua" && -r "$config_root/shell/shell.qml" ]] || {
+        printf 'Corvantium config is incomplete under %s. Run --install before registering the session.\n' "$config_root" >&2
+        return 1
+    }
     local temp desktop_exec backup
     temp="$(mktemp)"
     desktop_exec="$(desktop_exec_value)"
@@ -245,8 +256,8 @@ case "$mode" in
         printf 'Dry run: no files will be changed.\n'
         for i in "${!sources[@]}"; do printf '  %s -> %s\n' "$source_root/${sources[$i]}" "${destinations[$i]}"; done
         for name in "${binaries[@]}"; do printf '  symlink %s -> %s/scripts/%s\n' "$bin_root/$name" "$config_root" "$name"; done
-        [[ "$register" == true ]] && printf '  optional system file: %s (requires separate confirmation)\n' "$session_dest"
-        [[ "$remove_session" == true ]] && printf '  optional system file removal: %s (requires separate confirmation)\n' "$session_dest"
+        if [[ "$register" == true ]]; then printf '  optional system file: %s (requires separate confirmation)\n' "$session_dest"; fi
+        if [[ "$remove_session" == true ]]; then printf '  optional system file removal: %s (requires separate confirmation)\n' "$session_dest"; fi
         ;;
     install)
         preflight
@@ -254,10 +265,10 @@ case "$mode" in
         printf 'Existing files at those exact destinations are backed up; other desktop trees are not targets.\n'
         confirm 'Install Corvantium user files?' || { echo 'Install cancelled.'; exit 0; }
         install_user_files
-        [[ "$register" == true ]] && register_session_now
+        if [[ "$register" == true ]]; then register_session_now; fi
         ;;
     uninstall)
         uninstall_user_files
-        [[ "$remove_session" == true ]] && remove_session_now
+        if [[ "$remove_session" == true ]]; then remove_session_now; fi
         ;;
 esac

@@ -7,9 +7,18 @@ Item {
 
     property real attachmentX: width * 0.5
     property real phase: 0
-    property color fillColor: "#dc15121e"
-    property color rimColor: "#80a88bfa"
-    property color glowColor: "#55a88bfa"
+    property color fillColor: "#fa171c1f"
+    property color rimColor: "#708bd0d8"
+    property color glowColor: "#338bd0d8"
+    property bool animationEnabled: true
+    property real reveal: animationEnabled ? 1 : 0
+
+    opacity: reveal
+    scale: 0.975 + reveal * 0.025
+    Behavior on reveal {
+        NumberAnimation { duration: 145; easing.type: Easing.OutCubic }
+    }
+    onRevealChanged: canvas.requestPaint()
 
     Canvas {
         id: canvas
@@ -20,29 +29,33 @@ Item {
             const ctx = getContext("2d");
             ctx.clearRect(0, 0, width, height);
 
-            const x = Math.max(42, Math.min(width - 42, root.attachmentX));
-            const breathe = Math.sin(root.phase) * 2.2;
-            const widthPulse = Math.cos(root.phase * 0.7) * 2.5;
+            const radius = 14;
+            const x = Math.max(48, Math.min(width - 48, root.attachmentX));
+            const breathe = (root.reveal - 0.5) * 1.1;
+            const top = 10;
+            const apex = 0;
 
             ctx.beginPath();
-            ctx.moveTo(31, 24);
-            ctx.lineTo(x - 29, 24);
-            ctx.bezierCurveTo(x - 13, 24, x - 17, 5 + breathe, x, 5 + breathe);
-            ctx.bezierCurveTo(x + 17, 5 + breathe, x + 13, 24, x + 29, 24);
-            ctx.lineTo(width - 32, 24);
-            ctx.bezierCurveTo(width - 13, 24, width - 9 + widthPulse, 43, width - 15, 65);
-            ctx.bezierCurveTo(width - 5, height * 0.48, width - 13, height - 48, width - 42, height - 26);
-            ctx.bezierCurveTo(width * 0.72, height + 4, width * 0.32, height + 3, 42, height - 25);
-            ctx.bezierCurveTo(12, height - 42, 13, height - 83, 17, height * 0.55);
-            ctx.bezierCurveTo(3, height * 0.34, 8, 24, 31, 24);
+            ctx.moveTo(radius, top);
+            ctx.lineTo(x - 25, top);
+            ctx.bezierCurveTo(x - 12, top, x - 15, apex + breathe, x, apex + breathe);
+            ctx.bezierCurveTo(x + 15, apex + breathe, x + 12, top, x + 25, top);
+            ctx.lineTo(width - radius, top);
+            ctx.quadraticCurveTo(width, top, width, top + radius);
+            ctx.lineTo(width, height - radius);
+            ctx.quadraticCurveTo(width, height, width - radius, height);
+            ctx.lineTo(radius, height);
+            ctx.quadraticCurveTo(0, height, 0, height - radius);
+            ctx.lineTo(0, top + radius);
+            ctx.quadraticCurveTo(0, top, radius, top);
             ctx.closePath();
 
             const wash = ctx.createLinearGradient(0, 0, width, height);
             wash.addColorStop(0, root.fillColor.toString());
-            wash.addColorStop(0.55, "#df1b1728");
-            wash.addColorStop(1, "#e012101a");
+            wash.addColorStop(0.55, "#fa1b2326");
+            wash.addColorStop(1, "#fa171c1f");
             ctx.shadowColor = root.glowColor.toString();
-            ctx.shadowBlur = 22;
+            ctx.shadowBlur = 14;
             ctx.fillStyle = wash;
             ctx.fill();
             ctx.shadowBlur = 0;
@@ -50,11 +63,11 @@ Item {
             ctx.strokeStyle = root.rimColor.toString();
             ctx.stroke();
 
-            ctx.globalAlpha = 0.22;
-            ctx.fillStyle = "#d8f55a";
-            ctx.beginPath(); ctx.arc(width - 47, 46 + breathe, 2, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = "#a88bfa";
-            ctx.beginPath(); ctx.arc(width - 64, 58 - breathe, 1.5, 0, Math.PI * 2); ctx.fill();
+            ctx.globalAlpha = 0.3;
+            ctx.fillStyle = "#8bd2dc";
+            ctx.beginPath(); ctx.arc(width - 25, 49 + breathe, 2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#c4dfe2";
+            ctx.beginPath(); ctx.arc(width - 42, 49 - breathe, 1.5, 0, Math.PI * 2); ctx.fill();
             ctx.globalAlpha = 1;
         }
     }
@@ -62,16 +75,10 @@ Item {
     Item {
         id: contentLayer
         anchors.fill: parent
-        z: 1
-    }
-
-    Timer {
-        interval: 70
-        repeat: true
-        running: root.visible
-        onTriggered: {
-            root.phase = (root.phase + 0.045) % (Math.PI * 2);
-            canvas.requestPaint();
+        y: 8 * (1 - root.reveal)
+        Behavior on y {
+            NumberAnimation { duration: 145; easing.type: Easing.OutCubic }
         }
+        z: 1
     }
 }

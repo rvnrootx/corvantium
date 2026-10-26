@@ -31,6 +31,23 @@ ShellRoot {
     property int lyricOffset: 0
     property string nowTime: ""
     property string keyboardLayout: "…"
+    property bool overlayOpen: false
+    property bool barVisible: true
+    property string requestedPanel: ""
+
+    IpcHandler {
+        target: "corvantium"
+        function toggleOverlay(): void { shellState.overlayOpen = !shellState.overlayOpen; }
+        function closeOverlay(): void { shellState.overlayOpen = false; }
+        function toggleBar(): void { shellState.barVisible = !shellState.barVisible; }
+        function toggleMedia(): void { shellState.requestedPanel = shellState.requestedPanel === "media" ? "" : "media"; }
+    }
+
+    Process { id: overlayActionProcess }
+
+    function launchAction(action) {
+        overlayActionProcess.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", action]);
+    }
 
     function refreshPlayer() {
         const players = Mpris.players.values;
@@ -50,6 +67,8 @@ ShellRoot {
         if (signature !== lyricSignature) {
             lyricSignature = signature;
             lyricOffset = 0;
+            lyricData = ({ status: "loading", message: "Finding synchronized lyrics…", lines: [] });
+            lyricLines = [];
             lyricProcess.exec([
                 "python3", Quickshell.shellDir + "/services/lyrics.py",
                 "--title", selected.trackTitle || "", "--artist", selected.trackArtist || "",
@@ -61,6 +80,34 @@ ShellRoot {
     function updateClock() {
         const now = new Date();
         nowTime = Qt.formatTime(now, weatherData.time_format === "12h" ? "h:mm AP" : "HH:mm");
+    }
+
+    function currentLyricIndex() {
+        if (!activePlayer || lyricLines.length === 0) return -1;
+        const position = (activePlayer.position || 0) * 1000 + lyricOffset;
+        let current = -1;
+        for (let i = 0; i < lyricLines.length; i++) {
+            if (lyricLines[i].time * 1000 > position) break;
+            current = i;
+        }
+        return current;
+    }
+
+    function currentLyricLine() {
+        const index = currentLyricIndex();
+        if (index >= 0) return lyricLines[index].text;
+        const plain = (lyricData.plain || "").split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+        return plain.length > 0 ? plain[0] : "";
+    }
+
+    function barLyricText() {
+        const line = currentLyricLine();
+        if (line) return line;
+        if (!activePlayer) return "PLAY TO SYNC LYRICS";
+        if (lyricData.status === "loading") return "FINDING LYRICS…";
+        if (lyricData.status === "offline") return "LYRICS SERVICE OFFLINE";
+        if (lyricData.status === "no-match") return "NO LYRICS FOUND FOR THIS TRACK";
+        return "LYRICS WILL APPEAR HERE";
     }
 
     Process {
@@ -199,20 +246,80 @@ ShellRoot {
             id: barWindow
             required property var modelData
             screen: modelData
+            visible: shellState.barVisible
             anchors { top: true; left: true; right: true }
-            implicitHeight: 36
-            exclusiveZone: 36
+            implicitHeight: 44
+            exclusiveZone: 44
             color: "transparent"
 
             property string openPanel: ""
+            property string closingPanel: ""
+            property alias panelClosingTimer: panelCloseTimer
             property var settingsAnchor: null
+            property var calendarAnchor: null
             property string audioTab: "outputs"
             property int monthYear: new Date().getFullYear()
             property int monthIndex: new Date().getMonth()
             property var pickedDate: new Date()
             property string cameraStatus: "checking supported controls…"
+            property var selectedWifiNetwork: null
+            property string wifiPassword: ""
 
-            function togglePanel(name) { openPanel = openPanel === name ? "" : name; }
+            Timer {
+                id: panelCloseTimer
+                interval: 155
+                repeat: false
+                onTriggered: barWindow.closingPanel = ""
+            }
+
+            function togglePanel(name) {
+                const previous = openPanel;
+                if (previous === name) {
+                    closePanel(name);
+                    return;
+                }
+                panelCloseTimer.stop();
+                closingPanel = previous;
+                openPanel = name;
+                if (closingPanel) panelCloseTimer.restart();
+                shellState.requestedPanel = name;
+            }
+            function closePanel(name) {
+                if (openPanel === name) {
+                    closingPanel = name;
+                    openPanel = "";
+                    shellState.requestedPanel = "";
+                    panelCloseTimer.restart();
+                }
+            }
+            function scanWifi() {
+                if (!Networking.wifiEnabled) return;
+                const devices = Networking.devices.values;
+                for (let i = 0; i < devices.length; i++) {
+                    if (devices[i].type === DeviceType.Wifi) devices[i].scannerEnabled = true;
+                }
+            }
+            function wifiDevice() {
+                const devices = Networking.devices.values;
+                for (let i = 0; i < devices.length; i++) {
+                    if (devices[i].type === DeviceType.Wifi) return devices[i];
+                }
+                return null;
+            }
+            function availableWifiNetworks() {
+                const device = wifiDevice();
+                if (!device) return [];
+                const networks = device.networks.values.slice();
+                networks.sort((a, b) => a.connected !== b.connected ? (b.connected - a.connected) : b.signalStrength - a.signalStrength);
+                return networks;
+            }
+            function currentWifiNetwork() {
+                const networks = availableWifiNetworks();
+                for (let i = 0; i < networks.length; i++) {
+                    if (networks[i].connected) return networks[i];
+                }
+                return null;
+            }
             function appCommand(action) {
                 launchProcess.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", action]);
             }
@@ -258,85 +365,190 @@ ShellRoot {
             Component.onCompleted: {
                 cameraStatusProcess.running = true;
                 settingsAnchor = settingsButton;
+                calendarAnchor = clockButton;
+                openPanel = shellState.requestedPanel;
+            }
+            Connections {
+                target: shellState
+                function onRequestedPanelChanged() {
+                    const requested = shellState.requestedPanel;
+                    if (requested === barWindow.openPanel) return;
+                    if (barWindow.openPanel) barWindow.closingPanel = barWindow.openPanel;
+                    barWindow.openPanel = requested;
+                    barWindow.panelClosingTimer.stop();
+                    if (barWindow.closingPanel) barWindow.panelClosingTimer.restart();
+                }
             }
 
             Rectangle {
                 anchors.fill: parent
-                color: "#6815121e"
-                border.color: "#55a88bfa"
-                border.width: 1
-                radius: 18
-            }
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 9
-
-                RowLayout {
-                    spacing: 8
-                    Rectangle {
-                        Layout.preferredWidth: 25; Layout.preferredHeight: 25
-                        radius: 12; color: shellState.chartreuse
-                        Text { anchors.centerIn: parent; text: "C/"; color: shellState.ink; font.family: "monospace"; font.bold: true; font.pixelSize: 10 }
-                    }
-                    ColumnLayout {
-                        spacing: 0
-                        Text { text: "CORVANTIUM"; color: shellState.text; font.family: "monospace"; font.pixelSize: 10; font.bold: true; letterSpacing: 1.1 }
-                        Text { text: "FIELD / 01"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 7; letterSpacing: 1 }
-                    }
-                    Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 23; color: shellState.edge }
-                    ToolButton {
-                        id: clockButton
-                        Layout.preferredWidth: 78; Layout.preferredHeight: 29
-                        onClicked: barWindow.togglePanel("calendar")
-                        background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                        contentItem: Column {
-                            spacing: 0
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.bold: true; font.pixelSize: 10 }
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(new Date(), "ddd dd MMM"); color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
-                        }
-                    }
-                    ToolButton {
-                        id: weatherButton
-                        visible: shellState.weatherData.show_weather !== false
-                        Layout.preferredHeight: 29
-                        onClicked: barWindow.togglePanel("calendar")
-                        background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                        contentItem: RowLayout {
-                            spacing: 5
-                            Rectangle { Layout.preferredWidth: 2; Layout.preferredHeight: 17; color: shellState.chartreuse }
-                            Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "WX"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 9; rightPadding: 5 }
-                        }
+                color: "#a80b0912"
+                border.width: 0
+                radius: 0
+                Rectangle {
+                    anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                    height: 1; opacity: 0.42
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: shellState.chartreuse }
+                        GradientStop { position: 0.48; color: shellState.violet }
+                        GradientStop { position: 1.0; color: "#9ad9e2" }
                     }
                 }
+            }
+            RowLayout {
+                id: barLayout
+                anchors.fill: parent
+                anchors.leftMargin: 9
+                anchors.rightMargin: 9
+                spacing: 6
 
-                Item { Layout.fillWidth: true }
-
-                ToolButton {
-                    id: mediaButton
-                    Layout.preferredWidth: Math.min(280, Math.max(145, barWindow.screen.width * 0.2))
-                    Layout.preferredHeight: 29
-                    onClicked: barWindow.togglePanel("media")
-                    background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                    contentItem: RowLayout {
-                        spacing: 7
-                        Rectangle {
-                            Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 12; color: shellState.raised
-                            Image { anchors.fill: parent; source: shellState.activePlayer ? shellState.activePlayer.trackArtUrl : ""; fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready }
-                            Text { anchors.centerIn: parent; text: "∿"; color: shellState.chartreuse; font.pixelSize: 16; visible: !shellState.activePlayer || shellState.activePlayer.trackArtUrl === "" }
+                RowLayout {
+                    spacing: 5
+                    ToolButton {
+                        id: settingsButton
+                        text: "⚙"
+                        onClicked: { barWindow.settingsAnchor = settingsButton; barWindow.togglePanel("settings"); }
+                        Layout.preferredWidth: 26; Layout.preferredHeight: 28
+                        ToolTip.text: "Corvantium settings"
+                        ToolTip.visible: hovered
+                        background: Rectangle { color: barWindow.openPanel === "settings" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 15; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
+                    ToolButton {
+                        id: searchButton
+                        text: "⌕"
+                        onClicked: barWindow.appCommand("search")
+                        Layout.preferredWidth: 26; Layout.preferredHeight: 28
+                        ToolTip.text: "Search apps"
+                        ToolTip.visible: hovered
+                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
+                    RowLayout {
+                        spacing: 2
+                        Text {
+                            text: "FIELD"
+                            color: shellState.muted
+                            font.family: "monospace"; font.pixelSize: 6; font.letterSpacing: 0.7
+                            Layout.alignment: Qt.AlignVCenter
                         }
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 0
-                            Text { Layout.fillWidth: true; text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "NO SIGNAL / MPRIS"; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; elide: Text.ElideRight }
-                            Text { Layout.fillWidth: true; text: shellState.activePlayer ? barWindow.formatDuration(shellState.activePlayer.position) + "  /  " + (shellState.activePlayer.trackArtist || shellState.activePlayer.identity) : "Open a media source"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; elide: Text.ElideRight }
+                        Repeater {
+                            model: 10
+                            delegate: ToolButton {
+                                id: workspaceButton
+                                required property int index
+                                property int workspaceNumber: index + 1
+                                readonly property bool isActive: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === workspaceNumber
+                                readonly property bool hasWindows: Hyprland.workspaces.values.some(workspace => workspace.id === workspaceNumber)
+                                property real fieldWidth: isActive ? 29 : 12
+                                Layout.preferredWidth: fieldWidth
+                                Layout.preferredHeight: 27
+                                Behavior on fieldWidth { NumberAnimation { duration: 145; easing.type: Easing.OutCubic } }
+                                ToolTip.text: "Field " + (workspaceNumber < 10 ? "0" + workspaceNumber : workspaceNumber)
+                                ToolTip.visible: hovered
+                                onClicked: Hyprland.dispatch(
+                                    Hyprland.usingLua
+                                        ? "hl.dsp.focus({ workspace = " + workspaceNumber + " })"
+                                        : "workspace " + workspaceNumber
+                                )
+                                background: Rectangle {
+                                    radius: workspaceButton.isActive ? 8 : 6
+                                    color: workspaceButton.isActive ? shellState.chartreuse : (parent.hovered ? shellState.raised : "transparent")
+                                    border.width: workspaceButton.hasWindows && !workspaceButton.isActive ? 1 : 0
+                                    border.color: shellState.violet
+                                    Behavior on color { ColorAnimation { duration: 110 } }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: workspaceButton.isActive
+                                        text: workspaceButton.workspaceNumber < 10 ? "0" + workspaceButton.workspaceNumber : String(workspaceButton.workspaceNumber)
+                                        color: shellState.ink; font.family: "monospace"; font.pixelSize: 7; font.bold: true
+                                    }
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        visible: !workspaceButton.isActive
+                                        width: workspaceButton.hasWindows ? 5 : 3
+                                        height: workspaceButton.hasWindows ? 5 : 3
+                                        radius: 3
+                                        color: workspaceButton.hasWindows ? shellState.violet : "#514b5d"
+                                    }
+                                }
+                                contentItem: Item {}
+                            }
                         }
-                        ToolButton {
-                            text: shellState.activePlayer && shellState.activePlayer.isPlaying ? "Ⅱ" : "▶"
-                            Layout.preferredWidth: 23; Layout.preferredHeight: 23
-                            onClicked: if (shellState.activePlayer && shellState.activePlayer.canTogglePlaying) shellState.activePlayer.togglePlaying()
-                            background: Rectangle { color: "transparent" }
-                            contentItem: Text { text: parent.text; color: shellState.chartreuse; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
+                    ToolButton {
+                        id: mediaButton
+                        Layout.preferredWidth: Math.min(320, Math.max(220, barWindow.screen.width * 0.25))
+                        Layout.preferredHeight: 42
+                        onClicked: barWindow.togglePanel("media")
+                        background: Rectangle {
+                            color: barWindow.openPanel === "media" ? "#603b3450" : (parent.hovered ? "#3015121e" : "transparent")
+                            radius: 12
+                            border.color: barWindow.openPanel === "media" ? "#647dcd78" : "transparent"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 110 } }
+                        }
+                        contentItem: RowLayout {
+                            spacing: 5
+                            Rectangle {
+                                Layout.preferredWidth: 23; Layout.preferredHeight: 23; radius: 7
+                                color: shellState.raised; clip: true
+                                Image {
+                                    anchors.fill: parent
+                                    source: shellState.activePlayer ? shellState.activePlayer.trackArtUrl : ""
+                                    fillMode: Image.PreserveAspectCrop
+                                    visible: status === Image.Ready
+                                }
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "∿"; color: shellState.chartreuse; font.pixelSize: 15
+                                    visible: !shellState.activePlayer || shellState.activePlayer.trackArtUrl === ""
+                                }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 0
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "No player"
+                                    color: shellState.text; font.family: "monospace"; font.pixelSize: 9; font.bold: true
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: shellState.activePlayer ? (shellState.activePlayer.trackArtist || shellState.activePlayer.identity) : "Open a media source"
+                                    color: shellState.muted; font.family: "monospace"; font.pixelSize: 8
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: shellState.barLyricText()
+                                    color: shellState.currentLyricLine().length > 0 ? "#a7e8d4" : shellState.violet
+                                    font.family: "monospace"; font.pixelSize: 9; font.bold: true
+                                    elide: Text.ElideRight; visible: text.length > 0
+                                }
+                            }
+                            ToolButton {
+                                text: "‹"; enabled: shellState.activePlayer && shellState.activePlayer.canGoPrevious
+                                Layout.preferredWidth: 18; Layout.preferredHeight: 23
+                                onClicked: if (shellState.activePlayer && shellState.activePlayer.canGoPrevious) shellState.activePlayer.previous()
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                contentItem: Text { text: parent.text; color: shellState.muted; font.pixelSize: 16; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                            ToolButton {
+                                text: shellState.activePlayer && shellState.activePlayer.isPlaying ? "Ⅱ" : "▶"
+                                enabled: shellState.activePlayer && shellState.activePlayer.canTogglePlaying
+                                Layout.preferredWidth: 20; Layout.preferredHeight: 23
+                                onClicked: if (shellState.activePlayer && shellState.activePlayer.canTogglePlaying) shellState.activePlayer.togglePlaying()
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                contentItem: Text { text: parent.text; color: shellState.chartreuse; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                            ToolButton {
+                                text: "›"; enabled: shellState.activePlayer && shellState.activePlayer.canGoNext
+                                Layout.preferredWidth: 18; Layout.preferredHeight: 23
+                                onClicked: if (shellState.activePlayer && shellState.activePlayer.canGoNext) shellState.activePlayer.next()
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                contentItem: Text { text: parent.text; color: shellState.muted; font.pixelSize: 16; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
                         }
                     }
                 }
@@ -345,116 +557,132 @@ ShellRoot {
 
                 RowLayout {
                     spacing: 4
-                    Text { text: shellState.keyboardLayout; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; padding: 5 }
+                    ToolButton {
+                        text: shellState.keyboardLayout
+                        Layout.preferredWidth: 30; Layout.preferredHeight: 24
+                        ToolTip.text: "Keyboard layout"
+                        ToolTip.visible: hovered
+                        background: Rectangle { color: "transparent" }
+                        contentItem: Text { text: parent.text; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    }
                     ToolButton {
                         id: networkButton
-                        text: Networking.devices.values.some(d => d.connected) ? "N+" : "N–"
-                        background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                        contentItem: Text { text: parent.text; color: parent.text === "N+" ? shellState.violet : shellState.muted; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                        onClicked: { barWindow.settingsAnchor = networkButton; barWindow.togglePanel("settings"); }
+                        text: {
+                            const connected = barWindow.currentWifiNetwork();
+                            return "⌁ " + (connected ? connected.name : (Networking.wifiEnabled ? "Wi-Fi" : "Off"));
+                        }
+                        Layout.preferredWidth: Math.min(112, Math.max(72, barWindow.screen.width * 0.075)); Layout.preferredHeight: 25
+                        ToolTip.text: "Wi-Fi networks"
+                        ToolTip.visible: hovered
+                        background: Rectangle { color: barWindow.openPanel === "wifi" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: parent.text; color: Networking.wifiEnabled ? "#9ad9e2" : shellState.muted; font.family: "monospace"; font.pixelSize: 7; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; leftPadding: 3; rightPadding: 3 }
+                        onClicked: barWindow.togglePanel("wifi")
                     }
                     ToolButton {
                         id: bluetoothButton
-                        text: "B" + Bluetooth.devices.values.length
-                        background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                        contentItem: Text { text: parent.text; color: Bluetooth.devices.values.length > 0 ? shellState.violet : shellState.muted; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        text: "ᛒ"
+                        Layout.preferredWidth: 20; Layout.preferredHeight: 24
+                        ToolTip.text: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? "Bluetooth · " + Bluetooth.devices.values.length + " connected" : "Bluetooth off"
+                        ToolTip.visible: hovered
+                        background: Rectangle { color: barWindow.openPanel === "settings" && barWindow.settingsAnchor === bluetoothButton || parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: parent.text; color: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? shellState.violet : shellState.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                         onClicked: { barWindow.settingsAnchor = bluetoothButton; barWindow.togglePanel("settings"); }
                     }
                     ToolButton {
                         id: micButton
-                        text: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio ? (Pipewire.defaultAudioSource.audio.muted ? "MIC×" : "MIC+") : "MIC—"
+                        text: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? "×" : "◖"
+                        Layout.preferredWidth: 20; Layout.preferredHeight: 24
+                        ToolTip.text: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? "Microphone muted" : "Microphone on"
+                        ToolTip.visible: hovered
                         onClicked: if (Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio) Pipewire.defaultAudioSource.audio.muted = !Pipewire.defaultAudioSource.audio.muted
-                        background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                        contentItem: Text { text: micButton.text; color: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? shellState.chartreuse : shellState.muted; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: micButton.text; color: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? shellState.chartreuse : shellState.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     ToolButton {
                         id: volumeButton
                         text: {
                             const sink = Pipewire.defaultAudioSink;
-                            return sink && sink.audio ? (sink.audio.muted ? "VOL×" : Math.round(sink.audio.volume * 100) + "%") : "VOL—";
+                            return sink && sink.audio ? (sink.audio.muted ? "×" : "◖ " + Math.round(sink.audio.volume * 100) + "%") : "◖";
                         }
+                        Layout.preferredWidth: 49; Layout.preferredHeight: 24
+                        ToolTip.text: "Audio output"
+                        ToolTip.visible: hovered
                         onClicked: barWindow.togglePanel("audio")
-                        background: Rectangle { color: "transparent"; border.color: shellState.violet; border.width: 1; radius: 12 }
-                        contentItem: Text { text: volumeButton.text; color: shellState.violet; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; leftPadding: 5; rightPadding: 5 }
+                        background: Rectangle { color: barWindow.openPanel === "audio" || parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
+                        contentItem: Text { text: volumeButton.text; color: shellState.violet; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     Text {
-                        text: UPower.displayDevice && UPower.displayDevice.ready && UPower.onBattery ? "P " + Math.round(UPower.displayDevice.percentage) : (UPower.displayDevice && UPower.displayDevice.ready ? "P AC" : "P—")
-                        color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; padding: 4
+                        text: UPower.displayDevice && UPower.displayDevice.ready
+                            ? ((UPower.displayDevice.onBattery ? "▰ " : "ϟ ") + Math.round(UPower.displayDevice.percentage <= 1 ? UPower.displayDevice.percentage * 100 : Math.min(100, UPower.displayDevice.percentage)) + "%")
+                            : "—"
+                        color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; padding: 3
                     }
                 }
+            }
 
-                RowLayout {
-                    spacing: 1
-                    Repeater {
-                        model: 9
-                        delegate: ToolButton {
-                            required property int index
-                            property int workspaceNumber: index + 1
-                            readonly property bool isActive: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === workspaceNumber
-                            text: barWindow.pad(workspaceNumber)
-                            Layout.preferredWidth: barWindow.screen.width < 1100 ? 23 : 25
-                            Layout.preferredHeight: 25
-                            onClicked: Hyprland.dispatch("workspace " + workspaceNumber)
-                            background: Rectangle {
-                                color: "transparent"
-                                Rectangle {
-                                    anchors.centerIn: parent
-                                    width: parent.isActive ? parent.width : 17
-                                    height: 17; radius: 12
-                                    color: parent.isActive ? shellState.chartreuse : shellState.raised
-                                    border.color: parent.isActive ? shellState.chartreuse : shellState.edge
-                                    border.width: 1
-                                }
-                            }
-                            contentItem: Text { text: parent.text; color: parent.isActive ? shellState.ink : shellState.muted; font.family: "monospace"; font.pixelSize: 8; font.bold: parent.isActive; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                        }
+            RowLayout {
+                id: centeredControls
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 3
+                ToolButton {
+                    id: clockButton
+                    Layout.preferredWidth: 100; Layout.preferredHeight: 30
+                    onClicked: { barWindow.calendarAnchor = clockButton; barWindow.togglePanel("calendar"); }
+                    ToolTip.text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy")
+                    ToolTip.visible: hovered
+                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                    contentItem: Column {
+                        spacing: 0
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.bold: true; font.pixelSize: 9 }
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(new Date(), "dddd, dd MMMM"); color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
                     }
                 }
-
                 ToolButton {
-                    id: settingsButton
-                    text: "SET"
-                    onClicked: { barWindow.settingsAnchor = settingsButton; barWindow.togglePanel("settings"); }
-                    Layout.preferredWidth: 34; Layout.preferredHeight: 25
-                    background: Rectangle { color: "transparent"; border.color: shellState.edge; border.width: 1; radius: 12 }
-                    contentItem: Text { text: parent.text; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                }
-                ToolButton {
-                    id: searchButton
-                    text: "FIND"
-                    onClicked: barWindow.appCommand("search")
-                    Layout.preferredWidth: 38; Layout.preferredHeight: 25
-                    background: Rectangle { color: shellState.chartreuse; radius: 12 }
-                    contentItem: Text { text: parent.text; color: shellState.ink; font.family: "monospace"; font.pixelSize: 7; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                    id: weatherButton
+                    visible: shellState.weatherData.show_weather !== false
+                    Layout.preferredHeight: 28
+                    onClicked: { barWindow.calendarAnchor = weatherButton; barWindow.togglePanel("calendar"); }
+                    ToolTip.text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"
+                    ToolTip.visible: hovered
+                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                    contentItem: RowLayout {
+                        spacing: 4
+                        Text { text: "☁"; color: "#9ad9e2"; font.pixelSize: 12 }
+                        Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : ""; color: shellState.text; font.family: "monospace"; font.pixelSize: 8 }
+                    }
                 }
             }
 
             PopupWindow {
                 id: audioPopup
+                color: "transparent"
+                surfaceFormat.opaque: false
                 anchor.item: volumeButton
-                anchor.edges: Edges.Bottom | Edges.Right
-                anchor.gravity: Edges.Bottom | Edges.Right
-                anchor.margins.bottom: -5
-                width: Math.min(390, Math.max(280, barWindow.screen.width - 18)); height: Math.min(530, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "audio"
-                focusable: true; grabFocus: true
-                onVisibleChanged: if (!visible && barWindow.openPanel === "audio") barWindow.openPanel = ""
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "audio" || barWindow.closingPanel === "audio"
+                grabFocus: barWindow.openPanel === "audio"
+                onVisibleChanged: if (!visible) barWindow.closePanel("audio")
                 FluidPanel {
                     anchors.fill: parent
-                    attachmentX: width - 48
+                    animationEnabled: barWindow.openPanel === "audio"
+                    attachmentX: width * 0.5
                     focus: true
-                    Keys.onEscapePressed: { barWindow.openPanel = ""; event.accepted = true; }
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("audio"); event.accepted = true; }
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 17; anchors.topMargin: 31; spacing: 12
+                        anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 21; spacing: 9
                         RowLayout {
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
-                                Text { text: "SOUND ROUTING"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 10; font.bold: true; letterSpacing: 1 }
-                                Text { text: Pipewire.defaultAudioSink ? (Pipewire.defaultAudioSink.description || Pipewire.defaultAudioSink.name) : "No output device"; color: shellState.text; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text { text: "SOUND ROUTING"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1 }
+                                Text { text: Pipewire.defaultAudioSink ? (Pipewire.defaultAudioSink.description || Pipewire.defaultAudioSink.name) : "No output device"; color: shellState.text; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
                             Text {
                                 text: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio ? Math.round(Pipewire.defaultAudioSink.audio.volume * 100) + "%" : "—"
-                                color: shellState.violet; font.family: "monospace"; font.pixelSize: 23; font.bold: true
+                                color: shellState.violet; font.family: "monospace"; font.pixelSize: 18; font.bold: true
                             }
                         }
                         RowLayout {
@@ -463,7 +691,7 @@ ShellRoot {
                                 Layout.preferredWidth: 40; Layout.preferredHeight: 40
                                 onClicked: if (Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio) Pipewire.defaultAudioSink.audio.muted = !Pipewire.defaultAudioSink.audio.muted
                                 background: Rectangle { radius: 14; color: shellState.raised }
-                                contentItem: Text { text: parent.text; color: shellState.violet; font.pixelSize: 20; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                contentItem: Text { text: parent.text; color: shellState.violet; font.pixelSize: 17; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             Slider {
                                 Layout.fillWidth: true; from: 0; to: 1.5
@@ -488,7 +716,7 @@ ShellRoot {
                         }
                         Text {
                             text: barWindow.audioTab === "outputs" ? "PLAYBACK DEVICES" : (barWindow.audioTab === "inputs" ? "RECORDING DEVICES" : "APPLICATION STREAMS")
-                            color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1
+                            color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1
                         }
                         ListView {
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7
@@ -505,7 +733,7 @@ ShellRoot {
                                     anchors.fill: parent; anchors.margins: 10; spacing: 5
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        Text { Layout.fillWidth: true; text: modelData.description || modelData.name || "Audio node"; color: shellState.text; font.pixelSize: 11; font.bold: true; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; text: modelData.description || modelData.name || "Audio node"; color: shellState.text; font.pixelSize: 10; font.bold: true; elide: Text.ElideRight }
                                         ToolButton {
                                             text: modelData.audio && modelData.audio.muted ? "×" : "◖"; Layout.preferredWidth: 28; Layout.preferredHeight: 26
                                             onClicked: if (modelData.audio) modelData.audio.muted = !modelData.audio.muted
@@ -548,198 +776,282 @@ ShellRoot {
             }
 
             PopupWindow {
-                id: mediaPopup
-                anchor.item: mediaButton
-                anchor.edges: Edges.Bottom | Edges.Left
-                anchor.gravity: Edges.Bottom | Edges.Left
-                anchor.margins.bottom: -5
-                width: Math.min(660, Math.max(320, barWindow.screen.width - 24)); height: Math.min(560, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "media"
-                focusable: true; grabFocus: true
-                onVisibleChanged: if (!visible && barWindow.openPanel === "media") barWindow.openPanel = ""
-                property string mediaTab: "lyrics"
+                id: wifiPopup
+                color: "transparent"
+                surfaceFormat.opaque: false
+                anchor.item: networkButton
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24))
+                implicitHeight: Math.min(320, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "wifi" || barWindow.closingPanel === "wifi"
+                grabFocus: barWindow.openPanel === "wifi"
+                onVisibleChanged: {
+                    if (visible) barWindow.scanWifi();
+                    else barWindow.closePanel("wifi");
+                }
                 FluidPanel {
                     anchors.fill: parent
-                    attachmentX: Math.min(width - 48, Math.max(48, mediaButton.width * 0.5))
+                    animationEnabled: barWindow.openPanel === "wifi"
+                    attachmentX: width * 0.5
                     focus: true
-                    Keys.onEscapePressed: { barWindow.openPanel = ""; event.accepted = true; }
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("wifi"); event.accepted = true; }
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 18; anchors.topMargin: 31; spacing: 13
+                        anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 21; spacing: 8
                         RowLayout {
                             Layout.fillWidth: true
-                            Rectangle {
-                                Layout.preferredWidth: 182; Layout.preferredHeight: 182; radius: 14; color: "#201b2b"; clip: true
-                                Image { id: cover; anchors.fill: parent; source: shellState.activePlayer ? shellState.activePlayer.trackArtUrl : ""; fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready }
-                                Rectangle { anchors.fill: parent; color: "#650b0912"; visible: cover.status === Image.Ready }
-                                Text { anchors.centerIn: parent; text: "C"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 64; font.bold: true; visible: cover.status !== Image.Ready }
-                                Canvas {
-                                    anchors.fill: parent
-                                    onPaint: {
-                                        const ctx = getContext("2d");
-                                        ctx.clearRect(0, 0, width, height);
-                                        const levels = [0.28, 0.54, 0.76, 0.42, 0.91, 0.63, 0.35, 0.72, 0.48];
-                                        const barWidth = 8;
-                                        const gap = 7;
-                                        const baseY = height * 0.86;
-                                        ctx.fillStyle = "#d8f55a";
-                                        ctx.globalAlpha = 0.92;
-                                        for (let i = 0; i < levels.length; i++) {
-                                            const barHeight = 12 + levels[i] * 34;
-                                            ctx.fillRect(width * 0.08 + i * (barWidth + gap), baseY - barHeight, barWidth, barHeight);
-                                        }
-                                        ctx.globalAlpha = 1;
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 2
+                                Text { text: "NETWORK / WIFI"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1 }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        const connected = barWindow.currentWifiNetwork();
+                                        return connected ? connected.name : (Networking.wifiEnabled ? "Not connected" : "Wi-Fi is turned off");
                                     }
+                                color: shellState.text; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight
                                 }
                             }
-                            ColumnLayout {
-                                Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; spacing: 9
-                                Text { text: "NOW IN ROTATION"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1.2 }
-                                Text { Layout.fillWidth: true; text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "No MPRIS player"; color: shellState.text; font.family: "monospace"; font.pixelSize: 19; font.bold: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
-                                Text { Layout.fillWidth: true; text: shellState.activePlayer ? (shellState.activePlayer.trackArtist || "Unknown artist") : "Start Spotify or another MPRIS player"; color: shellState.muted; font.pixelSize: 13; elide: Text.ElideRight }
+                            Button {
+                                text: Networking.wifiEnabled ? "Turn off" : "Turn on"
+                                onClicked: Networking.wifiEnabled = !Networking.wifiEnabled
+                                background: Rectangle { radius: 11; color: parent.down ? "#63aeba" : "#81cbd7" }
+                                contentItem: Text { text: parent.text; color: "#10191b"; font.family: "monospace"; font.pixelSize: 9; font.bold: true; padding: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text { Layout.fillWidth: true; text: Networking.wifiHardwareEnabled ? "Wireless radio available" : "Wireless radio blocked by hardware"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8 }
+                            Button {
+                                text: "Scan"
+                                enabled: Networking.wifiEnabled && Networking.devices.values.some(device => device.type === DeviceType.Wifi)
+                                onClicked: barWindow.scanWifi()
+                                background: Rectangle { radius: 9; color: "#26272b"; border.color: "#485055"; border.width: 1 }
+                                contentItem: Text { text: parent.text; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
+                        Text { text: "AVAILABLE NETWORKS"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; font.letterSpacing: 1 }
+                        ListView {
+                            id: wifiNetworks
+                            Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7
+                            model: barWindow.availableWifiNetworks()
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: wifiNetworks.width; height: 54; radius: 10
+                                color: modelData.connected ? "#5c9eabb8" : "#a9192225"
+                                border.color: modelData.connected ? "#8ccfd9" : "#343d40"; border.width: 1
                                 RowLayout {
-                                    Rectangle { radius: 12; color: shellState.raised; implicitWidth: sourceText.implicitWidth + 16; implicitHeight: 25
-                                        Text { id: sourceText; anchors.centerIn: parent; text: shellState.activePlayer ? shellState.activePlayer.identity : "MPRIS"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 9 }
+                                    anchors.fill: parent; anchors.margins: 10; spacing: 9
+                                    Rectangle {
+                                        Layout.preferredWidth: 32; Layout.preferredHeight: 32; radius: 10
+                                        color: modelData.connected ? "#82cad6" : "#252c2f"
+                                        Text { anchors.centerIn: parent; text: modelData.connected ? "●" : "⌁"; color: modelData.connected ? "#102023" : "#a5dce3"; font.pixelSize: 15 }
                                     }
-                                    Text { Layout.fillWidth: true; text: Pipewire.defaultAudioSink ? "↗ " + (Pipewire.defaultAudioSink.description || Pipewire.defaultAudioSink.name) : "Audio route unavailable"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; elide: Text.ElideRight }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true; spacing: 4
+                                        RowLayout {
+                                            Layout.fillWidth: true; spacing: 4
+                                            Text { Layout.fillWidth: true; text: modelData.name || "Hidden network"; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight }
+                                            Text { text: modelData.known ? "SAVED" : ""; color: "#a5dce3"; font.family: "monospace"; font.pixelSize: 7 }
+                                        }
+                                        Rectangle {
+                                            Layout.fillWidth: true; height: 6; radius: 3; color: "#252d30"
+                                            Rectangle { width: parent.width * Math.max(0, Math.min(1, modelData.signalStrength)); height: parent.height; radius: 3; color: "#80cbd7" }
+                                        }
+                                        Text { text: Math.round(modelData.signalStrength * 100) + "% signal  ·  " + WifiSecurityType.toString(modelData.security); color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; elide: Text.ElideRight }
+                                    }
+                                    Button {
+                                        text: modelData.connected ? "Active" : (modelData.stateChanging ? "…" : "Join")
+                                        enabled: !modelData.connected && !modelData.stateChanging
+                                        onClicked: {
+                                            const security = WifiSecurityType.toString(modelData.security);
+                                            if (modelData.known || security === "Open" || !["WpaPsk", "Wpa2Psk", "Sae"].includes(security)) modelData.connect();
+                                            else { barWindow.selectedWifiNetwork = modelData; barWindow.wifiPassword = ""; }
+                                        }
+                                        background: Rectangle { radius: 9; color: parent.enabled ? "#82cad6" : "#30393b" }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? "#102023" : shellState.muted; font.family: "monospace"; font.pixelSize: 8; font.bold: true; padding: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                    }
                                 }
                             }
-                        }
-                        Slider {
-                            id: seekSlider
-                            Layout.fillWidth: true; from: 0; to: shellState.activePlayer && shellState.activePlayer.length > 0 ? shellState.activePlayer.length : 1
-                            value: shellState.activePlayer && shellState.activePlayer.positionSupported ? shellState.activePlayer.position : 0
-                            enabled: !!(shellState.activePlayer && shellState.activePlayer.canSeek)
-                            onMoved: if (shellState.activePlayer && shellState.activePlayer.canSeek) shellState.activePlayer.position = value
-                        }
-                        RowLayout {
-                            Text { text: shellState.activePlayer ? barWindow.formatDuration(shellState.activePlayer.position) : "00:00"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
-                            Item { Layout.fillWidth: true }
-                            ToolButton { text: "|◀"; enabled: !!(shellState.activePlayer && shellState.activePlayer.canGoPrevious); onClicked: if (shellState.activePlayer) shellState.activePlayer.previous(); contentItem: Text { text: parent.text; color: shellState.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
-                            ToolButton {
-                                text: shellState.activePlayer && shellState.activePlayer.isPlaying ? "Ⅱ" : "▶"
-                                enabled: !!(shellState.activePlayer && shellState.activePlayer.canTogglePlaying)
-                                onClicked: if (shellState.activePlayer) shellState.activePlayer.togglePlaying()
-                                background: Rectangle { radius: 14; color: shellState.chartreuse }
-                                contentItem: Text { text: parent.text; color: shellState.ink; font.bold: true; font.pixelSize: 17; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            footer: Text {
+                                visible: wifiNetworks.count === 0
+                                text: !Networking.wifiEnabled ? "Turn Wi-Fi on to scan for nearby networks." : (Networking.devices.values.some(device => device.type === DeviceType.Wifi) ? "No networks found yet. Press Scan to search again." : "No Wi-Fi device is available to NetworkManager.")
+                                color: shellState.muted; font.pixelSize: 10; wrapMode: Text.Wrap; padding: 12
                             }
-                            ToolButton { text: "▶|"; enabled: !!(shellState.activePlayer && shellState.activePlayer.canGoNext); onClicked: if (shellState.activePlayer) shellState.activePlayer.next(); contentItem: Text { text: parent.text; color: shellState.text; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
-                            Item { Layout.fillWidth: true }
-                            Text { text: shellState.activePlayer ? barWindow.formatDuration(shellState.activePlayer.length) : "00:00"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
                         }
-                        RowLayout {
-                            Repeater {
-                                model: ["equalizer", "audio", "lyrics"]
-                                delegate: ToolButton {
-                                    required property string modelData
-                                    text: modelData.toUpperCase()
-                                    Layout.fillWidth: true; Layout.preferredHeight: 31
-                                    onClicked: mediaPopup.mediaTab = modelData
-                                    background: Rectangle { color: mediaPopup.mediaTab === parent.modelData ? shellState.chartreuse : shellState.raised; radius: 12 }
-                                    contentItem: Text { text: parent.text; color: mediaPopup.mediaTab === parent.modelData ? shellState.ink : shellState.muted; font.family: "monospace"; font.pixelSize: 9; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        Rectangle {
+                            visible: barWindow.selectedWifiNetwork !== null
+                            Layout.fillWidth: true; Layout.preferredHeight: 52; radius: 12; color: "#ae1b2427"; border.color: "#597b8588"; border.width: 1
+                            RowLayout {
+                                anchors.fill: parent; anchors.margins: 7; spacing: 6
+                                TextField {
+                                    id: wifiPasswordField
+                                    Layout.fillWidth: true; Layout.fillHeight: true
+                                    placeholderText: "Password for " + (barWindow.selectedWifiNetwork ? barWindow.selectedWifiNetwork.name : "network")
+                                    text: barWindow.wifiPassword; onTextChanged: barWindow.wifiPassword = text
+                                    echoMode: TextInput.Password
+                                    background: Rectangle { radius: 8; color: "#252d30"; border.color: "#435256"; border.width: 1 }
+                                    color: shellState.text; placeholderTextColor: shellState.muted; leftPadding: 10
+                                    Keys.onReturnPressed: {
+                                        if (barWindow.selectedWifiNetwork && barWindow.wifiPassword.length > 0) {
+                                            barWindow.selectedWifiNetwork.connectWithPsk(barWindow.wifiPassword);
+                                            barWindow.selectedWifiNetwork = null;
+                                            barWindow.wifiPassword = "";
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        Item {
-                            Layout.fillWidth: true; Layout.fillHeight: true
-                            visible: mediaPopup.mediaTab === "equalizer"
-                            ColumnLayout {
-                                anchors.centerIn: parent; width: parent.width * 0.9; spacing: 10
-                                Text { text: "SYSTEM EFFECTS"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 10; font.bold: true }
-                                Text { Layout.fillWidth: true; text: "Corvantium does not apply a pretend EQ. When EasyEffects is installed, open it here to control the active PipeWire effects chain."; color: shellState.text; font.pixelSize: 12; wrapMode: Text.Wrap }
                                 Button {
-                                    text: "Open EasyEffects"
-                                    onClicked: { easyeffectsProcess.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "effects"]) }
-                                    background: Rectangle { radius: 12; color: shellState.raised }
-                                    contentItem: Text { text: parent.text; color: shellState.violet; padding: 8; horizontalAlignment: Text.AlignHCenter }
+                                    text: "Connect"
+                                    enabled: barWindow.wifiPassword.length > 0
+                                    onClicked: {
+                                        if (barWindow.selectedWifiNetwork) barWindow.selectedWifiNetwork.connectWithPsk(barWindow.wifiPassword);
+                                        barWindow.selectedWifiNetwork = null;
+                                        barWindow.wifiPassword = "";
+                                    }
+                                    background: Rectangle { radius: 8; color: "#82cad6" }
+                                    contentItem: Text { text: parent.text; color: "#102023"; font.family: "monospace"; font.pixelSize: 8; font.bold: true; padding: 6; horizontalAlignment: Text.AlignHCenter }
+                                }
+                                Button {
+                                    text: "×"; onClicked: barWindow.selectedWifiNetwork = null
+                                    background: Rectangle { radius: 8; color: "#252d30" }
+                                    contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 14; horizontalAlignment: Text.AlignHCenter }
                                 }
                             }
                         }
-                        Item {
-                            Layout.fillWidth: true; Layout.fillHeight: true
-                            visible: mediaPopup.mediaTab === "audio"
+                        Text { text: Networking.connectivityCheckEnabled ? "NetworkManager connectivity check: enabled" : "Use saved network profiles for networks already joined."; color: "#808d8f"; font.family: "monospace"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                    }
+                }
+            }
+
+            PopupWindow {
+                id: mediaPopup
+                color: "transparent"
+                surfaceFormat.opaque: false
+                anchor.item: mediaButton
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: Math.min(360, Math.max(290, barWindow.screen.width - 24))
+                implicitHeight: Math.min(280, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "media" || barWindow.closingPanel === "media"
+                grabFocus: barWindow.openPanel === "media"
+                onVisibleChanged: if (!visible) barWindow.closePanel("media")
+                FluidPanel {
+                    anchors.fill: parent
+                    animationEnabled: barWindow.openPanel === "media"
+                    attachmentX: width * 0.5
+                    focus: true
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("media"); event.accepted = true; }
+                    ColumnLayout {
+                        anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 18; spacing: 6
+                        RowLayout {
+                            Layout.fillWidth: true
                             ColumnLayout {
-                                anchors.fill: parent; spacing: 8
-                                Text { text: "OUTPUT DEVICE"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9 }
-                                Repeater {
-                                    model: ScriptModel { values: Pipewire.nodes.values.filter(node => node.audio && node.isSink && !node.isStream) }
-                                    delegate: ToolButton {
-                                        required property var modelData
-                                        Layout.fillWidth: true; Layout.preferredHeight: 34
-                                        text: (Pipewire.defaultAudioSink === modelData ? "✓  " : "   ") + (modelData.description || modelData.name)
-                                        onClicked: Pipewire.preferredDefaultAudioSink = modelData
-                                        background: Rectangle { radius: 12; color: Pipewire.defaultAudioSink === parent.modelData ? "#2d2640" : shellState.raised }
-                                        contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 10; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }
-                                    }
+                                Layout.fillWidth: true; spacing: 3
+                                Text { text: "LYRIC / LIVE FIELD"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.8 }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "No player active"
+                                    color: shellState.text; font.family: "monospace"; font.pixelSize: 12; font.bold: true
+                                    elide: Text.ElideRight
                                 }
-                                Text { visible: !Pipewire.defaultAudioSink; text: "No PipeWire output is connected."; color: shellState.muted; font.pixelSize: 11 }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: shellState.activePlayer ? (shellState.activePlayer.trackArtist || shellState.activePlayer.identity) : "Start music to follow lyrics"
+                                    color: shellState.muted; font.pixelSize: 9; elide: Text.ElideRight
+                                }
                             }
+                            Rectangle {
+                                width: 8; height: 8; radius: 4
+                                color: shellState.activePlayer && shellState.activePlayer.isPlaying ? shellState.chartreuse : shellState.edge
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                            }
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
+                        ListView {
+                            id: lyricList
+                            Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
+                            model: shellState.lyricLines
+                            visible: shellState.lyricLines.length > 0
+                            currentIndex: shellState.currentLyricIndex()
+                            onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Center)
+                            delegate: Text {
+                                required property int index
+                                required property var modelData
+                                width: ListView.view.width
+                                text: modelData.text
+                                color: index === lyricList.currentIndex ? shellState.chartreuse : "#d3cfdb"
+                                font.family: "monospace"; font.pixelSize: index === lyricList.currentIndex ? 13 : 10
+                                font.bold: index === lyricList.currentIndex
+                                wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
+                                Behavior on color { ColorAnimation { duration: 110 } }
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true; Layout.fillHeight: true
+                            visible: shellState.lyricLines.length === 0 && !!shellState.lyricData.plain
+                            text: shellState.lyricData.plain || ""
+                            color: shellState.text; font.family: "monospace"; font.pixelSize: 12; wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                         }
                         ColumnLayout {
-                            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 6
-                            visible: mediaPopup.mediaTab === "lyrics"
-                            RowLayout {
-                                Text { text: "LRCLIB · " + (shellState.lyricData.status || "waiting").toUpperCase(); color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9 }
-                                Item { Layout.fillWidth: true }
-                                ToolButton { text: "−"; onClicked: shellState.lyricOffset -= 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter } }
-                                Text { text: (shellState.lyricOffset >= 0 ? "+" : "") + shellState.lyricOffset + " ms"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
-                                ToolButton { text: "+"; onClicked: shellState.lyricOffset += 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter } }
-                            }
-                            ListView {
-                                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 9
-                                model: shellState.lyricLines
-                                visible: shellState.lyricLines.length > 0
-                                delegate: Text {
-                                    required property var modelData
-                                    width: ListView.view.width
-                                    text: modelData.text
-                                    color: shellState.activePlayer && shellState.activePlayer.position * 1000 + shellState.lyricOffset >= modelData.time * 1000 ? shellState.violet : shellState.muted
-                                    font.family: "monospace"; font.pixelSize: shellState.activePlayer && shellState.activePlayer.position * 1000 + shellState.lyricOffset >= modelData.time * 1000 ? 14 : 12
-                                    font.bold: shellState.activePlayer && shellState.activePlayer.position * 1000 + shellState.lyricOffset >= modelData.time * 1000
-                                    wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
-                                }
+                            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 5
+                            visible: shellState.lyricLines.length === 0 && !shellState.lyricData.plain
+                            Text {
+                                Layout.fillWidth: true
+                                text: shellState.lyricData.status === "offline" ? "LYRICS SERVICE OFFLINE" : shellState.lyricData.status === "no-match" ? "NO MATCH FOR THIS TRACK" : "SYNCING LYRICS"
+                                color: shellState.text; font.family: "monospace"; font.pixelSize: 11; font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
                             }
                             Text {
-                                Layout.fillWidth: true; Layout.fillHeight: true
-                                visible: shellState.lyricLines.length === 0 && !!shellState.lyricData.plain
-                                text: shellState.lyricData.plain || ""
-                                color: shellState.muted; font.family: "monospace"; font.pixelSize: 12; wrapMode: Text.Wrap
-                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
-                            }
-                            RowLayout {
                                 Layout.fillWidth: true
-                                Text { Layout.fillWidth: true; text: shellState.lyricData.message || ""; color: shellState.muted; font.pixelSize: 9; elide: Text.ElideRight }
-                                ToolButton {
-                                    text: "SEARCH"
-                                    visible: !!shellState.lyricData.search_url
-                                    onClicked: launcherForLyrics.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "browser", shellState.lyricData.search_url])
-                                    contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8 }
-                                }
+                                text: shellState.lyricData.message || "The current line will follow playback here."
+                                color: shellState.muted; font.pixelSize: 9; wrapMode: Text.Wrap
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 4
+                            Text { text: "LRCLIB · " + (shellState.lyricData.status || "waiting").toUpperCase(); color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8 }
+                            Item { Layout.fillWidth: true }
+                            ToolButton { text: "−"; Layout.preferredWidth: 20; Layout.preferredHeight: 22; onClicked: shellState.lyricOffset -= 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
+                            Text { text: (shellState.lyricOffset >= 0 ? "+" : "") + shellState.lyricOffset + " ms"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8 }
+                            ToolButton { text: "+"; Layout.preferredWidth: 20; Layout.preferredHeight: 22; onClicked: shellState.lyricOffset += 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
+                            ToolButton {
+                                text: "SEARCH ↗"
+                                visible: !!shellState.lyricData.search_url
+                                onClicked: launcherForLyrics.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "browser", shellState.lyricData.search_url])
+                                contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8 }
                             }
                         }
                     }
                 }
             }
-            Process { id: easyeffectsProcess }
             Process { id: launcherForLyrics }
             Process { id: launcherForWeather }
 
             PopupWindow {
                 id: calendarPopup
-                anchor.item: clockButton
-                anchor.edges: Edges.Bottom | Edges.Right
-                anchor.gravity: Edges.Bottom | Edges.Right
-                anchor.margins.bottom: -5
-                width: Math.min(960, Math.max(300, barWindow.screen.width - 24)); height: Math.min(500, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "calendar"
-                focusable: true; grabFocus: true
-                onVisibleChanged: if (!visible && barWindow.openPanel === "calendar") barWindow.openPanel = ""
+                color: "transparent"
+                surfaceFormat.opaque: false
+                anchor.item: barWindow.calendarAnchor
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: Math.min(500, Math.max(300, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "calendar" || barWindow.closingPanel === "calendar"
+                grabFocus: barWindow.openPanel === "calendar"
+                onVisibleChanged: if (!visible) barWindow.closePanel("calendar")
                 FluidPanel {
                     anchors.fill: parent
-                    attachmentX: width - clockButton.width * 0.5
+                    animationEnabled: barWindow.openPanel === "calendar"
+                    attachmentX: width * 0.5
                     focus: true
-                    Keys.onEscapePressed: { barWindow.openPanel = ""; event.accepted = true; }
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("calendar"); event.accepted = true; }
                     RowLayout {
-                        anchors.fill: parent; anchors.margins: 20; anchors.topMargin: 34; spacing: 16
+                        anchors.fill: parent; anchors.margins: 16; anchors.topMargin: 21; spacing: 12
                         ColumnLayout {
                             Layout.preferredWidth: Math.min(270, Math.max(150, (calendarPopup.width - 64) * 0.38)); Layout.fillHeight: true; spacing: 12
                             RowLayout {
@@ -791,18 +1103,18 @@ ShellRoot {
                             RowLayout {
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 4
-                                    Text { text: "FORECAST / LOCAL TIME"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1 }
-                                    Text { text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.pixelSize: 35; font.bold: true }
+                                    Text { text: "FORECAST / LOCAL TIME"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
+                                    Text { text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.pixelSize: 28; font.bold: true }
                                     Text { text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy"); color: shellState.muted; font.pixelSize: 11 }
                                 }
                                 ColumnLayout {
                                     Layout.preferredWidth: 170; spacing: 3
-                                    Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 32; font.bold: true; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
+                                    Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 26; font.bold: true; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
                                     Text { text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"; color: shellState.text; font.pixelSize: 11; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
                                     Text { text: shellState.weatherData.location || shellState.weatherData.message || "Set a city in settings"; color: shellState.muted; font.pixelSize: 9; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true; elide: Text.ElideRight }
                                 }
                             }
-                            Text { text: "NEXT HOURS"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1 }
+                            Text { text: "NEXT HOURS"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
                             ListView {
                                 Layout.fillWidth: true; Layout.preferredHeight: 112; orientation: ListView.Horizontal; spacing: 7; clip: true
                                 model: shellState.weatherData.hourly || []
@@ -812,7 +1124,7 @@ ShellRoot {
                                     Column {
                                         anchors.centerIn: parent; spacing: 7
                                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: barWindow.timeLabel(modelData.time); color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°"); color: shellState.text; font.family: "monospace"; font.pixelSize: 17; font.bold: true }
+                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°"); color: shellState.text; font.family: "monospace"; font.pixelSize: 14; font.bold: true }
                                         Text { anchors.horizontalCenter: parent.horizontalCenter; text: (modelData.precipitation_probability || 0) + "% rain"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 8 }
                                     }
                                 }
@@ -852,30 +1164,33 @@ ShellRoot {
 
             PopupWindow {
                 id: settingsPopup
+                color: "transparent"
+                surfaceFormat.opaque: false
                 anchor.item: barWindow.settingsAnchor
-                anchor.edges: Edges.Bottom | Edges.Right
-                anchor.gravity: Edges.Bottom | Edges.Right
-                anchor.margins.bottom: -5
-                width: 340; height: 310
-                visible: barWindow.openPanel === "settings"
-                focusable: true; grabFocus: true
-                onVisibleChanged: if (!visible && barWindow.openPanel === "settings") barWindow.openPanel = ""
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: 300; implicitHeight: 270
+                visible: barWindow.openPanel === "settings" || barWindow.closingPanel === "settings"
+                grabFocus: barWindow.openPanel === "settings"
+                onVisibleChanged: if (!visible) barWindow.closePanel("settings")
                 FluidPanel {
                     anchors.fill: parent
-                    attachmentX: width - 48
+                    animationEnabled: barWindow.openPanel === "settings"
+                    attachmentX: width * 0.5
                     focus: true
-                    Keys.onEscapePressed: { barWindow.openPanel = ""; event.accepted = true; }
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("settings"); event.accepted = true; }
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 17; anchors.topMargin: 31; spacing: 10
-                        Text { text: "CORVANTIUM / SESSION"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 10; font.bold: true; letterSpacing: 1 }
-                        Text { text: "An independent Hyprland profile"; color: shellState.text; font.pixelSize: 14; font.bold: true }
-                        Text { Layout.fillWidth: true; text: "This session uses its own files under ~/.config/corvantium. The existing Hyprland and Serpantinum configuration trees remain separate."; color: shellState.muted; font.pixelSize: 10; wrapMode: Text.Wrap }
+                        anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 21; spacing: 8
+                        Text { text: "CORVANTIUM / SESSION"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1 }
+                        Text { text: "An independent Hyprland profile"; color: shellState.text; font.pixelSize: 12; font.bold: true }
+                        Text { Layout.fillWidth: true; text: "This session uses its own files under ~/.config/corvantium. The existing Hyprland and Serpantinum configuration trees remain separate."; color: shellState.muted; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
-                        Text { text: "CONNECTIONS"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1 }
+                        Text { text: "CONNECTIONS"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
                         Text { text: Networking.devices.values.some(d => d.connected) ? "NetworkManager: connected" : "NetworkManager: disconnected / unavailable"; color: shellState.text; font.pixelSize: 10 }
                         Text { text: Bluetooth.defaultAdapter ? (Bluetooth.defaultAdapter.enabled ? "Bluetooth adapter: on · " + Bluetooth.devices.values.length + " connected" : "Bluetooth adapter: off") : "Bluetooth adapter: unavailable"; color: shellState.text; font.pixelSize: 10 }
-                        Text { text: "CAMERA PRIVACY"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; letterSpacing: 1 }
-                        Text { Layout.fillWidth: true; text: shellState.cameraStatus; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; wrapMode: Text.Wrap }
+                        Text { text: "CAMERA PRIVACY"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
+                        Text { Layout.fillWidth: true; text: barWindow.cameraStatus; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Text { Layout.fillWidth: true; text: "Only a reported V4L2 physical privacy control can be toggled. Software app permission is not represented as a hardware shutter."; color: shellState.muted; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Button {
                             text: "Toggle detected V4L2 control"
@@ -886,6 +1201,103 @@ ShellRoot {
                         Item { Layout.fillHeight: true }
                         Text { text: Quickshell.shellDir; color: "#736b85"; font.family: "monospace"; font.pixelSize: 8; elide: Text.ElideMiddle; Layout.fillWidth: true }
                     }
+                }
+            }
+        }
+    }
+
+    Variants {
+        model: Quickshell.screens
+        PanelWindow {
+            id: overlayWindow
+            required property var modelData
+            screen: modelData
+            anchors { top: true; bottom: true; left: true; right: true }
+            exclusionMode: ExclusionMode.Ignore
+            exclusiveZone: 0
+            visible: shellState.overlayOpen
+            color: "transparent"
+            surfaceFormat.opaque: false
+            WlrLayershell.namespace: "corvantium:overlay"
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.keyboardFocus: shellState.overlayOpen ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: shellState.overlayOpen = false
+            }
+
+            FluidPanel {
+                id: overlayCard
+                z: 1
+                animationEnabled: overlayWindow.visible
+                width: Math.min(360, overlayWindow.screen.width - 32)
+                height: Math.min(250, overlayWindow.screen.height - 72)
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: 50
+                attachmentX: width * 0.5
+                focus: true
+                Keys.onEscapePressed: function(event) { shellState.overlayOpen = false; event.accepted = true; }
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 15; anchors.topMargin: 29; spacing: 7
+                    RowLayout {
+                        ColumnLayout {
+                            Layout.fillWidth: true; spacing: 3
+                            Text { text: "CORVANTIUM / QUICK OVERLAY"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.2 }
+                            Text { text: "Controls at a glance."; color: shellState.text; font.pixelSize: 15; font.bold: true }
+                        }
+                        Text { text: shellState.nowTime; color: "#9ad9e2"; font.family: "monospace"; font.pixelSize: 14; font.bold: true }
+                    }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
+                    GridLayout {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        columns: 3; rowSpacing: 7; columnSpacing: 7
+                        Repeater {
+                            model: [
+                                { title: "Circle to Search", detail: "Select region · open browser", action: "screen-search" },
+                                { title: "Recognize music", detail: "Identify system audio", action: "music-identify" },
+                                { title: "Sound devices", detail: "Outputs and inputs", action: "audio" },
+                                { title: "Now playing", detail: "Track, controls, lyrics", action: "media" },
+                                { title: "Calendar & weather", detail: "Date and forecast", action: "calendar" },
+                                { title: "Wi-Fi & settings", detail: "Connections and controls", action: "wifi" }
+                            ]
+                            delegate: Button {
+                                id: actionCard
+                                required property var modelData
+                                Layout.fillWidth: true; Layout.fillHeight: true
+                                onClicked: {
+                                    shellState.overlayOpen = false;
+                                    if (modelData.action === "screen-search" || modelData.action === "music-identify") shellState.launchAction(modelData.action);
+                                    else shellState.requestedPanel = modelData.action;
+                                }
+                                background: Rectangle { radius: 12; color: parent.down ? "#35454a" : "#851a2327"; border.color: "#557b969a"; border.width: 1 }
+                                contentItem: ColumnLayout {
+                                    anchors.fill: parent; anchors.margins: 9; spacing: 3
+                                    Text { text: actionCard.modelData.title; color: shellState.text; font.pixelSize: 10; font.bold: true; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                                    Text { text: actionCard.modelData.detail; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                                }
+                            }
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; spacing: 4
+                        Text { text: "WORKSPACES"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
+                        Repeater {
+                            model: 10
+                            delegate: Button {
+                                required property int index
+                                Layout.fillWidth: true; Layout.preferredHeight: 23
+                                onClicked: {
+                                    Hyprland.dispatch(Hyprland.usingLua ? "hl.dsp.focus({ workspace = " + (index + 1) + " })" : "workspace " + (index + 1));
+                                    shellState.overlayOpen = false;
+                                }
+                                contentItem: Text { text: String(index + 1); color: shellState.text; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { radius: 8; color: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === index + 1 ? "#82cad6" : "#851a2327"; border.color: shellState.edge; border.width: 1 }
+                            }
+                        }
+                    }
+                    Text { text: "SUPER + /  KEYBIND GUIDE     ·     ESC  CLOSE"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
                 }
             }
         }

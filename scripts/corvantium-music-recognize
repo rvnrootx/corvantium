@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+notice() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name=Corvantium Corvantium "$1" || true
+    else
+        printf 'Corvantium: %s\n' "$1" >&2
+    fi
+}
+
+for binary in songrec pactl timeout python3 xdg-open; do
+    command -v "$binary" >/dev/null 2>&1 || { notice "Music recognition needs $binary."; exit 1; }
+done
+
+sink="$(pactl get-default-sink 2>/dev/null || true)"
+[[ -n "$sink" ]] || { notice 'No default audio output is available.'; exit 1; }
+source="${sink}.monitor"
+if ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -Fxq -- "$source"; then
+    notice 'Could not find the system-audio monitor. Check that PulseAudio compatibility is available.'
+    exit 1
+fi
+
+notice 'Listening briefly for music…'
+result="$(timeout --foreground 25s songrec listen --audio-device "$source" --request-interval 2 --json --disable-mpris 2>/dev/null | python3 -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        data = json.loads(line)
+        matches = data.get("matches") or []
+        if matches:
+            track = matches[0].get("track", {})
+            print(json.dumps({"title": track.get("title", ""), "artist": track.get("subtitle", ""), "url": track.get("url", "")}))
+            break
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        continue
+' || true)"
+
+if [[ -z "$result" ]]; then
+    notice 'No match found. Try again with clearer audio.'
+    exit 0
+fi
+
+python3 - "$result" <<'PY'
+import json
+import sys
+track = json.loads(sys.argv[1])
+print(f"Recognized: {track.get('title') or 'Unknown track'} — {track.get('artist') or 'Unknown artist'}")
+if track.get("url"):
+    import subprocess
+    subprocess.Popen(["xdg-open", track["url"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY

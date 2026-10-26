@@ -12,10 +12,10 @@ Corvantium is inspired by [Serpantinum](https://github.com/ilyamiro/serpantinum)
 | --- | --- |
 | Backdrop | Active wallpaper shows through the transparent shell, with faint original orbital accents |
 | Separate session | Starts the installed Hyprland executable with ~/.config/corvantium/hyprland/main.lua; optional login entry named **Hyprland Corvantium** |
-| Top panel | Settings/search, numbered workspaces, current MPRIS track, keyboard label, NetworkManager/BlueZ state, microphone/output controls, battery, clock, and weather |
+| Top panel | Translucent Field workspace constellation, settings/search, current track and live lyric, keyboard label, Wi-Fi/SSID, Bluetooth, microphone/output, battery, centered clock, and weather |
 | Audio mixer | Quickshell PipeWire integration for output/input/stream listing, volume, mute, and preferred default routes |
 | Calendar and weather | Local calendar navigation, local time, hourly outlook, current conditions and details; Open-Meteo, opt-in city, cache and offline state |
-| Media | Any MPRIS player, cover art, playback/seek controls, current output, LRCLIB synced/plain lyrics with position highlighting and manual offset |
+| Media | A compact lyrics-only popup with MPRIS track context, playback-synchronized LRCLIB lyrics, automatic current-line follow, plain-lyrics fallback, and manual timing offset |
 | EQ | Opens EasyEffects when installed; otherwise gives a clear unavailable message and does not simulate an effect |
 | Hardware | Brightness hotkeys when brightnessctl has a backlight; camera toggle only when V4L2 reports a privacy control |
 | Isolation | Corvantium config is namespaced under ~/.config/corvantium; standard Hyprland, Waybar, and Quickshell trees are not install targets |
@@ -72,11 +72,12 @@ Recommended or optional:
 
 - SDDM for the separately selectable graphical session
 - NetworkManager for the network indicator; BlueZ for Bluetooth; UPower for battery reporting
+- NetworkManager Wi-Fi support through Quickshell for scanning, SSID/signal display, saved networks, and protected network joins
 - fuzzel, wofi, or rofi for application search
 - A terminal (kitty, foot, ghostty, alacritty, wezterm, or konsole)
 - A file manager (dolphin, thunar, nautilus, nemo, or pcmanfm)
 - wpctl, playerctl, brightnessctl, v4l2-ctl, notify-send, and xdg-open for optional controls/fallbacks
-- hyprshutdown for a graceful session exit (Super+Shift+M falls back to `hyprctl dispatch exit` if it is unavailable)
+- hyprshutdown for a graceful session exit (Ctrl+Alt+Delete falls back to `hyprctl dispatch exit` if it is unavailable)
 - EasyEffects for system equalizer controls
 
 Missing optional apps and devices leave a fallback/unavailable state; the installer does not run a package manager.
@@ -110,11 +111,22 @@ Camera privacy controls are not universal. Corvantium only attempts a physical t
 | --- | --- |
 | Super tap | Application search |
 | Super+Space | Search fallback |
-| Super+1 … Super+9 | Switch workspace |
-| Super+E / Super+T | File manager / terminal |
+| Super+G / Super+Tab | Corvantium quick overlay and workspace selector |
+| Super+/ | Searchable keybinding guide |
+| Super+1 … Super+0 | Switch workspaces 1–10 |
+| Super+Shift+1 … Super+Shift+0 | Move the focused window to workspaces 1–10 |
+| Super+arrows / Super+Shift+arrows | Focus / move windows |
+| Super+Ctrl+Left / Right | Previous / next workspace |
+| Super+E / Super+W / Super+Return | File manager / browser / terminal |
+| Super+Shift+A / X | Circle to Search a selected screen region in the default browser / copy recognized screen text |
+| Super+Shift+S | Copy a selected screenshot region |
+| Super+Shift+G | Recognize music from system audio (requires `songrec` and PulseAudio compatibility) |
+| Super+V | Clipboard history (requires `cliphist`) |
+| Super+J / Super+M | Hide/show top bar / toggle media panel |
 | Super+Q | Close focused window |
-| Super+D / Super+F | Toggle floating / fullscreen |
-| Super+Shift+M | End Corvantium and return to the session selector |
+| Super+D / Super+F / Super+Alt+Space | Maximize / fullscreen / toggle floating |
+| Super+Shift+M | Toggle audio mute |
+| Ctrl+Alt+Delete | End Corvantium and return to the session selector |
 | Media keys | MPRIS play/pause, previous, next |
 | Volume and mic keys | PipeWire/WirePlumber output and source mute/volume |
 | Brightness keys | Change supported backlight brightness |

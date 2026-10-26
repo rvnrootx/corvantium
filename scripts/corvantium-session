@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config_home="${XDG_CONFIG_HOME:-$HOME/.config}/corvantium"
+if [[ -n "${CORVANTIUM_CONFIG_HOME:-}" ]]; then
+    config_home="$CORVANTIUM_CONFIG_HOME"
+else
+    xdg_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    # Accept both the normal XDG base directory and an explicitly selected
+    # Corvantium config root (some display managers export the latter).
+    if [[ -r "$xdg_config_home/hyprland/main.lua" ]]; then
+        config_home="$xdg_config_home"
+    else
+        config_home="$xdg_config_home/corvantium"
+    fi
+fi
 compositor="$(command -v Hyprland || command -v hyprland || true)"
 
 if [[ -z "$compositor" ]]; then
@@ -25,8 +36,12 @@ if ! command -v qs >/dev/null 2>&1; then
     printf '%s\n' 'Corvantium requires Quickshell 0.3 or newer.' >&2
     exit 127
 fi
-if [[ ! -r "$config_home/hyprland/main.lua" || ! -r "$config_home/shell/shell.qml" ]]; then
-    printf 'Corvantium is incomplete under %s; run scripts/install.sh first.\n' "$config_home" >&2
+if [[ ! -r "$config_home/hyprland/main.lua" ]]; then
+    printf 'Corvantium Hyprland config is missing: %s/hyprland/main.lua\nRun the Corvantium installer from its cloned repository.\n' "$config_home" >&2
+    exit 1
+fi
+if [[ ! -r "$config_home/shell/shell.qml" ]]; then
+    printf 'Corvantium shell is missing: %s/shell/shell.qml\nRun the Corvantium installer from its cloned repository.\n' "$config_home" >&2
     exit 1
 fi
 
