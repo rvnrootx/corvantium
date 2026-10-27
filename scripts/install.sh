@@ -32,11 +32,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_root="$(cd -- "$script_dir/.." && pwd -P)"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-if [[ -r "$config_home/hyprland/main.lua" ]]; then
-    config_root="$config_home"
-else
-    config_root="$config_home/corvantium"
-fi
+config_root="${CORVANTIUM_CONFIG_HOME:-$config_home/corvantium}"
 bin_root="${XDG_BIN_HOME:-$HOME/.local/bin}"
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/corvantium"
 manifest="$state_root/managed-files"
@@ -50,6 +46,10 @@ sources=(
     shell/settings.json
     shell/services/weather.py
     shell/services/lyrics.py
+    shell/services/network_speed.py
+    terminal/kitty.conf
+    terminal/zsh/.zshenv
+    terminal/zsh/.zshrc
     scripts/corvantium-session
     scripts/corvantium-launch
     scripts/corvantium-hardware
@@ -62,6 +62,10 @@ destinations=(
     "$config_root/shell/settings.json"
     "$config_root/shell/services/weather.py"
     "$config_root/shell/services/lyrics.py"
+    "$config_root/shell/services/network_speed.py"
+    "$config_root/terminal/kitty.conf"
+    "$config_root/terminal/zsh/.zshenv"
+    "$config_root/terminal/zsh/.zshrc"
     "$config_root/scripts/corvantium-session"
     "$config_root/scripts/corvantium-launch"
     "$config_root/scripts/corvantium-hardware"
@@ -178,7 +182,7 @@ register_session_now() {
     desktop_exec="$(desktop_exec_value)"
     sed "s|^Exec=.*|Exec=$desktop_exec|" "$session_template" > "$temp"
     printf 'Will install only: %s\n' "$session_dest"
-    printf 'The entry will not become the default and will not change Serpantinum.\n'
+    printf 'The entry will not become the default or alter any existing session entries.\n'
     confirm 'Register the Hyprland Corvantium session with SDDM?' || { rm -f "$temp"; echo 'Session registration cancelled.'; return 0; }
     if [[ -e "$session_dest" ]]; then
         backup="${XDG_STATE_HOME:-$HOME/.local/state}/corvantium/session-backup-$(date +%Y%m%d-%H%M%S).desktop"

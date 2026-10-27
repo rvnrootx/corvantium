@@ -34,6 +34,10 @@ ShellRoot {
     property bool overlayOpen: false
     property bool barVisible: true
     property string requestedPanel: ""
+    property string networkSpeedText: "↓ — ↑ —"
+    property string networkInterface: ""
+    property int previousRxBytes: -1
+    property int previousTxBytes: -1
 
     IpcHandler {
         target: "corvantium"
@@ -41,6 +45,7 @@ ShellRoot {
         function closeOverlay(): void { shellState.overlayOpen = false; }
         function toggleBar(): void { shellState.barVisible = !shellState.barVisible; }
         function toggleMedia(): void { shellState.requestedPanel = shellState.requestedPanel === "media" ? "" : "media"; }
+        function showPanel(panel: string): void { shellState.requestedPanel = panel; }
     }
 
     Process { id: overlayActionProcess }
@@ -80,6 +85,34 @@ ShellRoot {
     function updateClock() {
         const now = new Date();
         nowTime = Qt.formatTime(now, weatherData.time_format === "12h" ? "h:mm AP" : "HH:mm");
+    }
+
+    function compactRate(bytesPerSecond) {
+        if (bytesPerSecond < 1000) return Math.round(bytesPerSecond) + "B/s";
+        if (bytesPerSecond < 1000000) return (bytesPerSecond / 1000).toFixed(1) + "K/s";
+        if (bytesPerSecond < 1000000000) return (bytesPerSecond / 1000000).toFixed(1) + "M/s";
+        return (bytesPerSecond / 1000000000).toFixed(1) + "G/s";
+    }
+
+    function activeNetworkInterface() {
+        const devices = Networking.devices.values;
+        for (let i = 0; i < devices.length; i++) {
+            if (devices[i].type !== DeviceType.Wifi || devices[i].name === "lo") continue;
+            const networks = devices[i].networks.values;
+            for (let n = 0; n < networks.length; n++) {
+                if (networks[n].connected) return devices[i].name;
+            }
+        }
+        for (let i = 0; i < devices.length; i++) {
+            if (devices[i].connected && devices[i].name !== "lo") return devices[i].name;
+        }
+        return "";
+    }
+
+    function pollNetworkSpeed() {
+        networkSpeedProcess.exec([
+            "python3", Quickshell.shellDir + "/services/network_speed.py", activeNetworkInterface()
+        ]);
     }
 
     function currentLyricIndex() {
@@ -154,6 +187,31 @@ ShellRoot {
             }
         }
     }
+    Process {
+        id: networkSpeedProcess
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const sample = JSON.parse(text);
+                    if (!sample.interface || sample.interface !== shellState.networkInterface || shellState.previousRxBytes < 0) {
+                        shellState.networkSpeedText = "↓ — ↑ —";
+                    } else {
+                        const rxRate = Math.max(0, (sample.rx - shellState.previousRxBytes) / 2);
+                        const txRate = Math.max(0, (sample.tx - shellState.previousTxBytes) / 2);
+                        shellState.networkSpeedText = "↓ " + shellState.compactRate(rxRate) + " ↑ " + shellState.compactRate(txRate);
+                    }
+                    shellState.networkInterface = sample.interface || "";
+                    shellState.previousRxBytes = sample.rx;
+                    shellState.previousTxBytes = sample.tx;
+                } catch (error) {
+                    shellState.networkSpeedText = "↓ — ↑ —";
+                    shellState.networkInterface = "";
+                    shellState.previousRxBytes = -1;
+                    shellState.previousTxBytes = -1;
+                }
+            }
+        }
+    }
 
     Timer {
         interval: 1000
@@ -185,11 +243,18 @@ ShellRoot {
         repeat: true
         onTriggered: keyboardProcess.running = true
     }
+    Timer {
+        interval: 2000
+        running: true
+        repeat: true
+        onTriggered: shellState.pollNetworkSpeed()
+    }
     Component.onCompleted: {
         updateClock();
         refreshPlayer();
         weatherProcess.running = true;
         keyboardProcess.running = true;
+        pollNetworkSpeed();
     }
 
     Variants {
@@ -253,8 +318,6 @@ ShellRoot {
             color: "transparent"
 
             property string openPanel: ""
-            property string closingPanel: ""
-            property alias panelClosingTimer: panelCloseTimer
             property var settingsAnchor: null
             property var calendarAnchor: null
             property string audioTab: "outputs"
@@ -265,31 +328,14 @@ ShellRoot {
             property var selectedWifiNetwork: null
             property string wifiPassword: ""
 
-            Timer {
-                id: panelCloseTimer
-                interval: 155
-                repeat: false
-                onTriggered: barWindow.closingPanel = ""
-            }
-
             function togglePanel(name) {
-                const previous = openPanel;
-                if (previous === name) {
-                    closePanel(name);
-                    return;
-                }
-                panelCloseTimer.stop();
-                closingPanel = previous;
-                openPanel = name;
-                if (closingPanel) panelCloseTimer.restart();
-                shellState.requestedPanel = name;
+                openPanel = openPanel === name ? "" : name;
+                shellState.requestedPanel = openPanel;
             }
             function closePanel(name) {
                 if (openPanel === name) {
-                    closingPanel = name;
                     openPanel = "";
                     shellState.requestedPanel = "";
-                    panelCloseTimer.restart();
                 }
             }
             function scanWifi() {
@@ -364,19 +410,13 @@ ShellRoot {
             }
             Component.onCompleted: {
                 cameraStatusProcess.running = true;
-                settingsAnchor = settingsButton;
                 calendarAnchor = clockButton;
                 openPanel = shellState.requestedPanel;
             }
             Connections {
                 target: shellState
                 function onRequestedPanelChanged() {
-                    const requested = shellState.requestedPanel;
-                    if (requested === barWindow.openPanel) return;
-                    if (barWindow.openPanel) barWindow.closingPanel = barWindow.openPanel;
-                    barWindow.openPanel = requested;
-                    barWindow.panelClosingTimer.stop();
-                    if (barWindow.closingPanel) barWindow.panelClosingTimer.restart();
+                    barWindow.openPanel = shellState.requestedPanel;
                 }
             }
 
@@ -405,80 +445,16 @@ ShellRoot {
                 RowLayout {
                     spacing: 5
                     ToolButton {
-                        id: settingsButton
-                        text: "⚙"
-                        onClicked: { barWindow.settingsAnchor = settingsButton; barWindow.togglePanel("settings"); }
-                        Layout.preferredWidth: 26; Layout.preferredHeight: 28
-                        ToolTip.text: "Corvantium settings"
-                        ToolTip.visible: hovered
-                        background: Rectangle { color: barWindow.openPanel === "settings" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
-                        contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 15; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                    }
-                    ToolButton {
-                        id: searchButton
-                        text: "⌕"
+                        id: launcherButton
+                        text: "🐧"
                         onClicked: barWindow.appCommand("search")
-                        Layout.preferredWidth: 26; Layout.preferredHeight: 28
-                        ToolTip.text: "Search apps"
-                        ToolTip.visible: hovered
-                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
-                        contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                    }
-                    RowLayout {
-                        spacing: 2
-                        Text {
-                            text: "FIELD"
-                            color: shellState.muted
-                            font.family: "monospace"; font.pixelSize: 6; font.letterSpacing: 0.7
-                            Layout.alignment: Qt.AlignVCenter
-                        }
-                        Repeater {
-                            model: 10
-                            delegate: ToolButton {
-                                id: workspaceButton
-                                required property int index
-                                property int workspaceNumber: index + 1
-                                readonly property bool isActive: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === workspaceNumber
-                                readonly property bool hasWindows: Hyprland.workspaces.values.some(workspace => workspace.id === workspaceNumber)
-                                property real fieldWidth: isActive ? 29 : 12
-                                Layout.preferredWidth: fieldWidth
-                                Layout.preferredHeight: 27
-                                Behavior on fieldWidth { NumberAnimation { duration: 145; easing.type: Easing.OutCubic } }
-                                ToolTip.text: "Field " + (workspaceNumber < 10 ? "0" + workspaceNumber : workspaceNumber)
-                                ToolTip.visible: hovered
-                                onClicked: Hyprland.dispatch(
-                                    Hyprland.usingLua
-                                        ? "hl.dsp.focus({ workspace = " + workspaceNumber + " })"
-                                        : "workspace " + workspaceNumber
-                                )
-                                background: Rectangle {
-                                    radius: workspaceButton.isActive ? 8 : 6
-                                    color: workspaceButton.isActive ? shellState.chartreuse : (parent.hovered ? shellState.raised : "transparent")
-                                    border.width: workspaceButton.hasWindows && !workspaceButton.isActive ? 1 : 0
-                                    border.color: shellState.violet
-                                    Behavior on color { ColorAnimation { duration: 110 } }
-                                    Text {
-                                        anchors.centerIn: parent
-                                        visible: workspaceButton.isActive
-                                        text: workspaceButton.workspaceNumber < 10 ? "0" + workspaceButton.workspaceNumber : String(workspaceButton.workspaceNumber)
-                                        color: shellState.ink; font.family: "monospace"; font.pixelSize: 7; font.bold: true
-                                    }
-                                    Rectangle {
-                                        anchors.centerIn: parent
-                                        visible: !workspaceButton.isActive
-                                        width: workspaceButton.hasWindows ? 5 : 3
-                                        height: workspaceButton.hasWindows ? 5 : 3
-                                        radius: 3
-                                        color: workspaceButton.hasWindows ? shellState.violet : "#514b5d"
-                                    }
-                                }
-                                contentItem: Item {}
-                            }
-                        }
+                        Layout.preferredWidth: 32; Layout.preferredHeight: 32
+                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 10; }
+                        contentItem: Text { text: parent.text; font.pixelSize: 17; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     ToolButton {
                         id: mediaButton
-                        Layout.preferredWidth: Math.min(320, Math.max(220, barWindow.screen.width * 0.25))
+                        Layout.preferredWidth: Math.min(650, Math.max(500, barWindow.screen.width * 0.42))
                         Layout.preferredHeight: 42
                         onClicked: barWindow.togglePanel("media")
                         background: Rectangle {
@@ -486,7 +462,6 @@ ShellRoot {
                             radius: 12
                             border.color: barWindow.openPanel === "media" ? "#647dcd78" : "transparent"
                             border.width: 1
-                            Behavior on color { ColorAnimation { duration: 110 } }
                         }
                         contentItem: RowLayout {
                             spacing: 5
@@ -510,28 +485,28 @@ ShellRoot {
                                 Text {
                                     Layout.fillWidth: true
                                     text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "No player"
-                                    color: shellState.text; font.family: "monospace"; font.pixelSize: 9; font.bold: true
+                                    color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true
                                     elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
                                     text: shellState.activePlayer ? (shellState.activePlayer.trackArtist || shellState.activePlayer.identity) : "Open a media source"
-                                    color: shellState.muted; font.family: "monospace"; font.pixelSize: 8
+                                    color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8
                                     elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
                                     text: shellState.barLyricText()
                                     color: shellState.currentLyricLine().length > 0 ? "#a7e8d4" : shellState.violet
-                                    font.family: "monospace"; font.pixelSize: 9; font.bold: true
-                                    elide: Text.ElideRight; visible: text.length > 0
+                                    font.family: "Iosevka Nerd Font"; font.pixelSize: 8; font.bold: true
+                                    elide: Text.ElideNone; clip: true; visible: text.length > 0
                                 }
                             }
                             ToolButton {
                                 text: "‹"; enabled: shellState.activePlayer && shellState.activePlayer.canGoPrevious
                                 Layout.preferredWidth: 18; Layout.preferredHeight: 23
                                 onClicked: if (shellState.activePlayer && shellState.activePlayer.canGoPrevious) shellState.activePlayer.previous()
-                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; }
                                 contentItem: Text { text: parent.text; color: shellState.muted; font.pixelSize: 16; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             ToolButton {
@@ -539,14 +514,14 @@ ShellRoot {
                                 enabled: shellState.activePlayer && shellState.activePlayer.canTogglePlaying
                                 Layout.preferredWidth: 20; Layout.preferredHeight: 23
                                 onClicked: if (shellState.activePlayer && shellState.activePlayer.canTogglePlaying) shellState.activePlayer.togglePlaying()
-                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; }
                                 contentItem: Text { text: parent.text; color: shellState.chartreuse; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             ToolButton {
                                 text: "›"; enabled: shellState.activePlayer && shellState.activePlayer.canGoNext
                                 Layout.preferredWidth: 18; Layout.preferredHeight: 23
                                 onClicked: if (shellState.activePlayer && shellState.activePlayer.canGoNext) shellState.activePlayer.next()
-                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; Behavior on color { ColorAnimation { duration: 100 } } }
+                                background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 8; }
                                 contentItem: Text { text: parent.text; color: shellState.muted; font.pixelSize: 16; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                         }
@@ -560,10 +535,8 @@ ShellRoot {
                     ToolButton {
                         text: shellState.keyboardLayout
                         Layout.preferredWidth: 30; Layout.preferredHeight: 24
-                        ToolTip.text: "Keyboard layout"
-                        ToolTip.visible: hovered
                         background: Rectangle { color: "transparent" }
-                        contentItem: Text { text: parent.text; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        contentItem: Text { text: parent.text; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     ToolButton {
                         id: networkButton
@@ -572,30 +545,32 @@ ShellRoot {
                             return "⌁ " + (connected ? connected.name : (Networking.wifiEnabled ? "Wi-Fi" : "Off"));
                         }
                         Layout.preferredWidth: Math.min(112, Math.max(72, barWindow.screen.width * 0.075)); Layout.preferredHeight: 25
-                        ToolTip.text: "Wi-Fi networks"
-                        ToolTip.visible: hovered
-                        background: Rectangle { color: barWindow.openPanel === "wifi" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
-                        contentItem: Text { text: parent.text; color: Networking.wifiEnabled ? "#9ad9e2" : shellState.muted; font.family: "monospace"; font.pixelSize: 7; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; leftPadding: 3; rightPadding: 3 }
+                        background: Rectangle { color: barWindow.openPanel === "wifi" || parent.hovered ? shellState.raised : "transparent"; radius: 10; }
+                        contentItem: Text { text: parent.text; color: Networking.wifiEnabled ? "#9ad9e2" : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; leftPadding: 3; rightPadding: 3 }
                         onClicked: barWindow.togglePanel("wifi")
+                    }
+                    Text {
+                        text: shellState.networkSpeedText
+                        color: shellState.muted
+                        font.family: "Iosevka Nerd Font"; font.pixelSize: 7
+                        Layout.preferredWidth: 88
+                        elide: Text.ElideRight
+                        verticalAlignment: Text.AlignVCenter
                     }
                     ToolButton {
                         id: bluetoothButton
                         text: "ᛒ"
                         Layout.preferredWidth: 20; Layout.preferredHeight: 24
-                        ToolTip.text: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? "Bluetooth · " + Bluetooth.devices.values.length + " connected" : "Bluetooth off"
-                        ToolTip.visible: hovered
-                        background: Rectangle { color: barWindow.openPanel === "settings" && barWindow.settingsAnchor === bluetoothButton || parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
+                        background: Rectangle { color: barWindow.openPanel === "bluetooth" || parent.hovered ? shellState.raised : "transparent"; radius: 9 }
                         contentItem: Text { text: parent.text; color: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? shellState.violet : shellState.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                        onClicked: { barWindow.settingsAnchor = bluetoothButton; barWindow.togglePanel("settings"); }
+                        onClicked: barWindow.togglePanel("bluetooth")
                     }
                     ToolButton {
                         id: micButton
                         text: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? "×" : "◖"
                         Layout.preferredWidth: 20; Layout.preferredHeight: 24
-                        ToolTip.text: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? "Microphone muted" : "Microphone on"
-                        ToolTip.visible: hovered
                         onClicked: if (Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio) Pipewire.defaultAudioSource.audio.muted = !Pipewire.defaultAudioSource.audio.muted
-                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
+                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 9; }
                         contentItem: Text { text: micButton.text; color: Pipewire.defaultAudioSource && Pipewire.defaultAudioSource.audio && Pipewire.defaultAudioSource.audio.muted ? shellState.chartreuse : shellState.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     ToolButton {
@@ -605,17 +580,15 @@ ShellRoot {
                             return sink && sink.audio ? (sink.audio.muted ? "×" : "◖ " + Math.round(sink.audio.volume * 100) + "%") : "◖";
                         }
                         Layout.preferredWidth: 49; Layout.preferredHeight: 24
-                        ToolTip.text: "Audio output"
-                        ToolTip.visible: hovered
                         onClicked: barWindow.togglePanel("audio")
-                        background: Rectangle { color: barWindow.openPanel === "audio" || parent.hovered ? shellState.raised : "transparent"; radius: 9; Behavior on color { ColorAnimation { duration: 100 } } }
-                        contentItem: Text { text: volumeButton.text; color: shellState.violet; font.family: "monospace"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle { color: barWindow.openPanel === "audio" || parent.hovered ? shellState.raised : "transparent"; radius: 9; }
+                        contentItem: Text { text: volumeButton.text; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     Text {
                         text: UPower.displayDevice && UPower.displayDevice.ready
                             ? ((UPower.displayDevice.onBattery ? "▰ " : "ϟ ") + Math.round(UPower.displayDevice.percentage <= 1 ? UPower.displayDevice.percentage * 100 : Math.min(100, UPower.displayDevice.percentage)) + "%")
                             : "—"
-                        color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; padding: 3
+                        color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; padding: 3
                     }
                 }
             }
@@ -629,13 +602,11 @@ ShellRoot {
                     id: clockButton
                     Layout.preferredWidth: 100; Layout.preferredHeight: 30
                     onClicked: { barWindow.calendarAnchor = clockButton; barWindow.togglePanel("calendar"); }
-                    ToolTip.text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy")
-                    ToolTip.visible: hovered
-                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; }
                     contentItem: Column {
                         spacing: 0
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.bold: true; font.pixelSize: 9 }
-                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(new Date(), "dddd, dd MMMM"); color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "Iosevka Nerd Font"; font.bold: true; font.pixelSize: 9 }
+                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(new Date(), "dddd, dd MMMM"); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7 }
                     }
                 }
                 ToolButton {
@@ -643,13 +614,65 @@ ShellRoot {
                     visible: shellState.weatherData.show_weather !== false
                     Layout.preferredHeight: 28
                     onClicked: { barWindow.calendarAnchor = weatherButton; barWindow.togglePanel("calendar"); }
-                    ToolTip.text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"
-                    ToolTip.visible: hovered
-                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; Behavior on color { ColorAnimation { duration: 100 } } }
+                    background: Rectangle { color: barWindow.openPanel === "calendar" || parent.hovered ? shellState.raised : "transparent"; radius: 10; }
                     contentItem: RowLayout {
                         spacing: 4
                         Text { text: "☁"; color: "#9ad9e2"; font.pixelSize: 12 }
-                        Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : ""; color: shellState.text; font.family: "monospace"; font.pixelSize: 8 }
+                        Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : ""; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
+                    }
+                }
+            }
+
+            RowLayout {
+                id: workspaceTrack
+                anchors.left: centeredControls.right
+                anchors.leftMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 1
+                visible: barWindow.screen.width >= 1100
+                Text {
+                    text: "FIELD"
+                    color: shellState.muted
+                    font.family: "Iosevka Nerd Font"; font.pixelSize: 6; font.letterSpacing: 0.7
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Repeater {
+                    model: 10
+                    delegate: ToolButton {
+                        id: workspaceButton
+                        required property int index
+                        property int workspaceNumber: index + 1
+                        readonly property bool isActive: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === workspaceNumber
+                        readonly property bool hasWindows: Hyprland.workspaces.values.some(workspace => workspace.id === workspaceNumber)
+                        property int fieldWidth: isActive ? 24 : 8
+                        Layout.preferredWidth: fieldWidth
+                        Layout.preferredHeight: 24
+                        onClicked: Hyprland.dispatch(
+                            Hyprland.usingLua
+                                ? "hl.dsp.focus({ workspace = \"" + workspaceNumber + "\" })"
+                                : "workspace " + workspaceNumber
+                        )
+                        background: Rectangle {
+                            radius: workspaceButton.isActive ? 7 : 5
+                            color: workspaceButton.isActive ? shellState.chartreuse : (parent.hovered ? shellState.raised : "transparent")
+                            border.width: workspaceButton.hasWindows && !workspaceButton.isActive ? 1 : 0
+                            border.color: shellState.violet
+                            Text {
+                                anchors.centerIn: parent
+                                visible: workspaceButton.isActive
+                                text: workspaceButton.workspaceNumber < 10 ? "0" + workspaceButton.workspaceNumber : String(workspaceButton.workspaceNumber)
+                                color: shellState.ink; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; font.bold: true
+                            }
+                            Rectangle {
+                                anchors.centerIn: parent
+                                visible: !workspaceButton.isActive
+                                width: workspaceButton.hasWindows ? 5 : 3
+                                height: workspaceButton.hasWindows ? 5 : 3
+                                radius: 3
+                                color: workspaceButton.hasWindows ? shellState.violet : "#514b5d"
+                            }
+                        }
+                        contentItem: Item {}
                     }
                 }
             }
@@ -663,12 +686,11 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "audio" || barWindow.closingPanel === "audio"
+                visible: barWindow.openPanel === "audio"
                 grabFocus: barWindow.openPanel === "audio"
                 onVisibleChanged: if (!visible) barWindow.closePanel("audio")
                 FluidPanel {
                     anchors.fill: parent
-                    animationEnabled: barWindow.openPanel === "audio"
                     attachmentX: width * 0.5
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("audio"); event.accepted = true; }
@@ -677,12 +699,12 @@ ShellRoot {
                         RowLayout {
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
-                                Text { text: "SOUND ROUTING"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1 }
+                                Text { text: "SOUND ROUTING"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1 }
                                 Text { text: Pipewire.defaultAudioSink ? (Pipewire.defaultAudioSink.description || Pipewire.defaultAudioSink.name) : "No output device"; color: shellState.text; font.pixelSize: 12; font.bold: true; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
                             Text {
                                 text: Pipewire.defaultAudioSink && Pipewire.defaultAudioSink.audio ? Math.round(Pipewire.defaultAudioSink.audio.volume * 100) + "%" : "—"
-                                color: shellState.violet; font.family: "monospace"; font.pixelSize: 18; font.bold: true
+                                color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 18; font.bold: true
                             }
                         }
                         RowLayout {
@@ -710,13 +732,13 @@ ShellRoot {
                                     Layout.fillWidth: true; Layout.preferredHeight: 32
                                     onClicked: barWindow.audioTab = modelData
                                     background: Rectangle { radius: 12; color: barWindow.audioTab === parent.modelData ? shellState.chartreuse : shellState.raised }
-                                    contentItem: Text { text: parent.text; color: barWindow.audioTab === parent.modelData ? shellState.ink : shellState.muted; font.family: "monospace"; font.pixelSize: 9; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                    contentItem: Text { text: parent.text; color: barWindow.audioTab === parent.modelData ? shellState.ink : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                                 }
                             }
                         }
                         Text {
                             text: barWindow.audioTab === "outputs" ? "PLAYBACK DEVICES" : (barWindow.audioTab === "inputs" ? "RECORDING DEVICES" : "APPLICATION STREAMS")
-                            color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1
+                            color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1
                         }
                         ListView {
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7
@@ -745,7 +767,7 @@ ShellRoot {
                                         Layout.fillWidth: true
                                         Text {
                                             text: barWindow.audioTab === "outputs" && Pipewire.defaultAudioSink === modelData ? "DEFAULT OUTPUT" : (barWindow.audioTab === "inputs" && Pipewire.defaultAudioSource === modelData ? "DEFAULT INPUT" : (modelData.isStream ? "APPLICATION" : "AVAILABLE"))
-                                            color: shellState.violet; font.family: "monospace"; font.pixelSize: 8; Layout.preferredWidth: 85
+                                            color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; Layout.preferredWidth: 85
                                         }
                                         Slider {
                                             Layout.fillWidth: true; from: 0; to: 1.5
@@ -760,7 +782,7 @@ ShellRoot {
                                                 if (barWindow.audioTab === "outputs") Pipewire.preferredDefaultAudioSink = modelData;
                                                 else if (barWindow.audioTab === "inputs") Pipewire.preferredDefaultAudioSource = modelData;
                                             }
-                                            contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                            contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                                         }
                                     }
                                 }
@@ -770,7 +792,7 @@ ShellRoot {
                                 text: "No matching PipeWire devices are available."; color: shellState.muted; font.pixelSize: 11; padding: 12
                             }
                         }
-                        Text { text: "Live controls via Quickshell PipeWire · WirePlumber"; color: "#736b85"; font.family: "monospace"; font.pixelSize: 8 }
+                        Text { text: "Live controls via Quickshell PipeWire · WirePlumber"; color: "#736b85"; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                     }
                 }
             }
@@ -785,7 +807,7 @@ ShellRoot {
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24))
                 implicitHeight: Math.min(320, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "wifi" || barWindow.closingPanel === "wifi"
+                visible: barWindow.openPanel === "wifi"
                 grabFocus: barWindow.openPanel === "wifi"
                 onVisibleChanged: {
                     if (visible) barWindow.scanWifi();
@@ -793,7 +815,6 @@ ShellRoot {
                 }
                 FluidPanel {
                     anchors.fill: parent
-                    animationEnabled: barWindow.openPanel === "wifi"
                     attachmentX: width * 0.5
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("wifi"); event.accepted = true; }
@@ -803,7 +824,7 @@ ShellRoot {
                             Layout.fillWidth: true
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
-                                Text { text: "NETWORK / WIFI"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1 }
+                                Text { text: "NETWORK / WIFI"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1 }
                                 Text {
                                     Layout.fillWidth: true
                                     text: {
@@ -817,22 +838,22 @@ ShellRoot {
                                 text: Networking.wifiEnabled ? "Turn off" : "Turn on"
                                 onClicked: Networking.wifiEnabled = !Networking.wifiEnabled
                                 background: Rectangle { radius: 11; color: parent.down ? "#63aeba" : "#81cbd7" }
-                                contentItem: Text { text: parent.text; color: "#10191b"; font.family: "monospace"; font.pixelSize: 9; font.bold: true; padding: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                contentItem: Text { text: parent.text; color: "#10191b"; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; padding: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            Text { Layout.fillWidth: true; text: Networking.wifiHardwareEnabled ? "Wireless radio available" : "Wireless radio blocked by hardware"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8 }
+                            Text { Layout.fillWidth: true; text: Networking.wifiHardwareEnabled ? "Wireless radio available" : "Wireless radio blocked by hardware"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                             Button {
                                 text: "Scan"
                                 enabled: Networking.wifiEnabled && Networking.devices.values.some(device => device.type === DeviceType.Wifi)
                                 onClicked: barWindow.scanWifi()
                                 background: Rectangle { radius: 9; color: "#26272b"; border.color: "#485055"; border.width: 1 }
-                                contentItem: Text { text: parent.text; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                contentItem: Text { text: parent.text; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
-                        Text { text: "AVAILABLE NETWORKS"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; font.letterSpacing: 1 }
+                        Text { text: "AVAILABLE NETWORKS"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; font.letterSpacing: 1 }
                         ListView {
                             id: wifiNetworks
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7
@@ -853,14 +874,14 @@ ShellRoot {
                                         Layout.fillWidth: true; spacing: 4
                                         RowLayout {
                                             Layout.fillWidth: true; spacing: 4
-                                            Text { Layout.fillWidth: true; text: modelData.name || "Hidden network"; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight }
-                                            Text { text: modelData.known ? "SAVED" : ""; color: "#a5dce3"; font.family: "monospace"; font.pixelSize: 7 }
+                                            Text { Layout.fillWidth: true; text: modelData.name || "Hidden network"; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight }
+                                            Text { text: modelData.known ? "SAVED" : ""; color: "#a5dce3"; font.family: "Iosevka Nerd Font"; font.pixelSize: 7 }
                                         }
                                         Rectangle {
                                             Layout.fillWidth: true; height: 6; radius: 3; color: "#252d30"
                                             Rectangle { width: parent.width * Math.max(0, Math.min(1, modelData.signalStrength)); height: parent.height; radius: 3; color: "#80cbd7" }
                                         }
-                                        Text { text: Math.round(modelData.signalStrength * 100) + "% signal  ·  " + WifiSecurityType.toString(modelData.security); color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; elide: Text.ElideRight }
+                                        Text { text: Math.round(modelData.signalStrength * 100) + "% signal  ·  " + WifiSecurityType.toString(modelData.security); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; elide: Text.ElideRight }
                                     }
                                     Button {
                                         text: modelData.connected ? "Active" : (modelData.stateChanging ? "…" : "Join")
@@ -871,7 +892,7 @@ ShellRoot {
                                             else { barWindow.selectedWifiNetwork = modelData; barWindow.wifiPassword = ""; }
                                         }
                                         background: Rectangle { radius: 9; color: parent.enabled ? "#82cad6" : "#30393b" }
-                                        contentItem: Text { text: parent.text; color: parent.enabled ? "#102023" : shellState.muted; font.family: "monospace"; font.pixelSize: 8; font.bold: true; padding: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? "#102023" : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; font.bold: true; padding: 7; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                                     }
                                 }
                             }
@@ -911,7 +932,7 @@ ShellRoot {
                                         barWindow.wifiPassword = "";
                                     }
                                     background: Rectangle { radius: 8; color: "#82cad6" }
-                                    contentItem: Text { text: parent.text; color: "#102023"; font.family: "monospace"; font.pixelSize: 8; font.bold: true; padding: 6; horizontalAlignment: Text.AlignHCenter }
+                                    contentItem: Text { text: parent.text; color: "#102023"; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; font.bold: true; padding: 6; horizontalAlignment: Text.AlignHCenter }
                                 }
                                 Button {
                                     text: "×"; onClicked: barWindow.selectedWifiNetwork = null
@@ -920,7 +941,7 @@ ShellRoot {
                                 }
                             }
                         }
-                        Text { text: Networking.connectivityCheckEnabled ? "NetworkManager connectivity check: enabled" : "Use saved network profiles for networks already joined."; color: "#808d8f"; font.family: "monospace"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                        Text { text: Networking.connectivityCheckEnabled ? "NetworkManager connectivity check: enabled" : "Use saved network profiles for networks already joined."; color: "#808d8f"; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
                     }
                 }
             }
@@ -934,13 +955,12 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(360, Math.max(290, barWindow.screen.width - 24))
-                implicitHeight: Math.min(280, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "media" || barWindow.closingPanel === "media"
+                implicitHeight: Math.min(330, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "media"
                 grabFocus: barWindow.openPanel === "media"
                 onVisibleChanged: if (!visible) barWindow.closePanel("media")
                 FluidPanel {
                     anchors.fill: parent
-                    animationEnabled: barWindow.openPanel === "media"
                     attachmentX: width * 0.5
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("media"); event.accepted = true; }
@@ -950,11 +970,11 @@ ShellRoot {
                             Layout.fillWidth: true
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 3
-                                Text { text: "LYRIC / LIVE FIELD"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.8 }
+                                Text { text: "LYRIC / LIVE FIELD"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.8 }
                                 Text {
                                     Layout.fillWidth: true
                                     text: shellState.activePlayer ? (shellState.activePlayer.trackTitle || "Untitled") : "No player active"
-                                    color: shellState.text; font.family: "monospace"; font.pixelSize: 12; font.bold: true
+                                    color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 12; font.bold: true
                                     elide: Text.ElideRight
                                 }
                                 Text {
@@ -966,10 +986,23 @@ ShellRoot {
                             Rectangle {
                                 width: 8; height: 8; radius: 4
                                 color: shellState.activePlayer && shellState.activePlayer.isPlaying ? shellState.chartreuse : shellState.edge
-                                Behavior on color { ColorAnimation { duration: 120 } }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 7
+                            Text { text: barWindow.formatDuration(shellState.activePlayer ? shellState.activePlayer.position : 0); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; Layout.preferredWidth: 35 }
+                            Slider {
+                                id: mediaSeekSlider
+                                Layout.fillWidth: true
+                                from: 0
+                                to: shellState.activePlayer && shellState.activePlayer.lengthSupported ? shellState.activePlayer.length : 1
+                                value: shellState.activePlayer ? Math.min(to, shellState.activePlayer.position) : 0
+                                enabled: shellState.activePlayer && shellState.activePlayer.canSeek && shellState.activePlayer.positionSupported && shellState.activePlayer.lengthSupported
+                                onMoved: if (shellState.activePlayer) shellState.activePlayer.position = value
+                            }
+                            Text { text: barWindow.formatDuration(shellState.activePlayer ? shellState.activePlayer.length : 0); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; Layout.preferredWidth: 35; horizontalAlignment: Text.AlignRight }
+                        }
                         ListView {
                             id: lyricList
                             Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8
@@ -983,17 +1016,16 @@ ShellRoot {
                                 width: ListView.view.width
                                 text: modelData.text
                                 color: index === lyricList.currentIndex ? shellState.chartreuse : "#d3cfdb"
-                                font.family: "monospace"; font.pixelSize: index === lyricList.currentIndex ? 13 : 10
+                                font.family: "Iosevka Nerd Font"; font.pixelSize: index === lyricList.currentIndex ? 13 : 10
                                 font.bold: index === lyricList.currentIndex
                                 wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
-                                Behavior on color { ColorAnimation { duration: 110 } }
                             }
                         }
                         Text {
                             Layout.fillWidth: true; Layout.fillHeight: true
                             visible: shellState.lyricLines.length === 0 && !!shellState.lyricData.plain
                             text: shellState.lyricData.plain || ""
-                            color: shellState.text; font.family: "monospace"; font.pixelSize: 12; wrapMode: Text.Wrap
+                            color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 12; wrapMode: Text.Wrap
                             horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                         }
                         ColumnLayout {
@@ -1002,7 +1034,7 @@ ShellRoot {
                             Text {
                                 Layout.fillWidth: true
                                 text: shellState.lyricData.status === "offline" ? "LYRICS SERVICE OFFLINE" : shellState.lyricData.status === "no-match" ? "NO MATCH FOR THIS TRACK" : "SYNCING LYRICS"
-                                color: shellState.text; font.family: "monospace"; font.pixelSize: 11; font.bold: true
+                                color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 11; font.bold: true
                                 horizontalAlignment: Text.AlignHCenter
                             }
                             Text {
@@ -1014,16 +1046,16 @@ ShellRoot {
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 4
-                            Text { text: "LRCLIB · " + (shellState.lyricData.status || "waiting").toUpperCase(); color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8 }
+                            Text { text: "LRCLIB · " + (shellState.lyricData.status || "waiting").toUpperCase(); color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                             Item { Layout.fillWidth: true }
                             ToolButton { text: "−"; Layout.preferredWidth: 20; Layout.preferredHeight: 22; onClicked: shellState.lyricOffset -= 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
-                            Text { text: (shellState.lyricOffset >= 0 ? "+" : "") + shellState.lyricOffset + " ms"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8 }
+                            Text { text: (shellState.lyricOffset >= 0 ? "+" : "") + shellState.lyricOffset + " ms"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                             ToolButton { text: "+"; Layout.preferredWidth: 20; Layout.preferredHeight: 22; onClicked: shellState.lyricOffset += 250; contentItem: Text { text: parent.text; color: shellState.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } }
                             ToolButton {
                                 text: "SEARCH ↗"
                                 visible: !!shellState.lyricData.search_url
                                 onClicked: launcherForLyrics.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "browser", shellState.lyricData.search_url])
-                                contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 8 }
+                                contentItem: Text { text: parent.text; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                             }
                         }
                     }
@@ -1041,12 +1073,11 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(500, Math.max(300, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "calendar" || barWindow.closingPanel === "calendar"
+                visible: barWindow.openPanel === "calendar"
                 grabFocus: barWindow.openPanel === "calendar"
                 onVisibleChanged: if (!visible) barWindow.closePanel("calendar")
                 FluidPanel {
                     anchors.fill: parent
-                    animationEnabled: barWindow.openPanel === "calendar"
                     attachmentX: width * 0.5
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("calendar"); event.accepted = true; }
@@ -1056,14 +1087,14 @@ ShellRoot {
                             Layout.preferredWidth: Math.min(270, Math.max(150, (calendarPopup.width - 64) * 0.38)); Layout.fillHeight: true; spacing: 12
                             RowLayout {
                                 ToolButton { text: "‹"; onClicked: barWindow.changeMonth(-1); contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 20; horizontalAlignment: Text.AlignHCenter } }
-                                Text { Layout.fillWidth: true; text: Qt.formatDate(new Date(barWindow.monthYear, barWindow.monthIndex, 1), "MMMM yyyy").toUpperCase(); color: shellState.text; font.family: "monospace"; font.pixelSize: 11; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                                Text { Layout.fillWidth: true; text: Qt.formatDate(new Date(barWindow.monthYear, barWindow.monthIndex, 1), "MMMM yyyy").toUpperCase(); color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 11; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                                 ToolButton { text: "›"; onClicked: barWindow.changeMonth(1); contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 20; horizontalAlignment: Text.AlignHCenter } }
                             }
                             GridLayout {
                                 Layout.fillWidth: true; columns: 7; rowSpacing: 5; columnSpacing: 3
                                 Repeater {
                                     model: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
-                                    delegate: Text { required property string modelData; text: modelData; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
+                                    delegate: Text { required property string modelData; text: modelData; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
                                 }
                                 Repeater {
                                     model: 42
@@ -1082,7 +1113,7 @@ ShellRoot {
                                         contentItem: Text {
                                             text: parent.text
                                             color: cellDate.getMonth() === barWindow.monthIndex ? (cellDate.toDateString() === barWindow.pickedDate.toDateString() ? shellState.ink : shellState.text) : "#736b85"
-                                            font.family: "monospace"; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                            font.family: "Iosevka Nerd Font"; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                                         }
                                     }
                                 }
@@ -1092,8 +1123,8 @@ ShellRoot {
                                 Layout.fillWidth: true; Layout.preferredHeight: 72; color: shellState.raised; radius: 14
                                 Column {
                                     anchors.centerIn: parent; spacing: 3
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.pixelSize: 24; font.bold: true }
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(barWindow.pickedDate, "dddd · dd MMMM yyyy"); color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 24; font.bold: true }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(barWindow.pickedDate, "dddd · dd MMMM yyyy"); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9 }
                                 }
                             }
                         }
@@ -1103,18 +1134,18 @@ ShellRoot {
                             RowLayout {
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 4
-                                    Text { text: "FORECAST / LOCAL TIME"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
-                                    Text { text: shellState.nowTime; color: shellState.text; font.family: "monospace"; font.pixelSize: 28; font.bold: true }
+                                    Text { text: "FORECAST / LOCAL TIME"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
+                                    Text { text: shellState.nowTime; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 28; font.bold: true }
                                     Text { text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy"); color: shellState.muted; font.pixelSize: 11 }
                                 }
                                 ColumnLayout {
                                     Layout.preferredWidth: 170; spacing: 3
-                                    Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 26; font.bold: true; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
+                                    Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 26; font.bold: true; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
                                     Text { text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"; color: shellState.text; font.pixelSize: 11; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
                                     Text { text: shellState.weatherData.location || shellState.weatherData.message || "Set a city in settings"; color: shellState.muted; font.pixelSize: 9; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true; elide: Text.ElideRight }
                                 }
                             }
-                            Text { text: "NEXT HOURS"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
+                            Text { text: "NEXT HOURS"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
                             ListView {
                                 Layout.fillWidth: true; Layout.preferredHeight: 112; orientation: ListView.Horizontal; spacing: 7; clip: true
                                 model: shellState.weatherData.hourly || []
@@ -1123,9 +1154,9 @@ ShellRoot {
                                     width: 76; height: 96; radius: 14; color: shellState.raised; border.color: shellState.edge; border.width: 1
                                     Column {
                                         anchors.centerIn: parent; spacing: 7
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: barWindow.timeLabel(modelData.time); color: shellState.muted; font.family: "monospace"; font.pixelSize: 9 }
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°"); color: shellState.text; font.family: "monospace"; font.pixelSize: 14; font.bold: true }
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: (modelData.precipitation_probability || 0) + "% rain"; color: shellState.violet; font.family: "monospace"; font.pixelSize: 8 }
+                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: barWindow.timeLabel(modelData.time); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9 }
+                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°"); color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 14; font.bold: true }
+                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: (modelData.precipitation_probability || 0) + "% rain"; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
                                     }
                                 }
                                 footer: Text { visible: !shellState.weatherData.ok; text: shellState.weatherData.message || "No forecast data. Configure a city in shell/settings.json."; color: shellState.muted; font.pixelSize: 10; padding: 8 }
@@ -1144,8 +1175,8 @@ ShellRoot {
                                         Layout.fillWidth: true; Layout.fillHeight: true; radius: 14; color: shellState.raised
                                         Column {
                                             anchors.centerIn: parent; spacing: 5
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: shellState.muted; font.family: "monospace"; font.pixelSize: 8 }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.value; color: shellState.text; font.family: "monospace"; font.pixelSize: 14; font.bold: true }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
+                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.value; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 14; font.bold: true }
                                         }
                                     }
                                 }
@@ -1154,8 +1185,123 @@ ShellRoot {
                                 text: shellState.weatherData.show_weather === false ? "Weather is disabled in Corvantium settings." : (shellState.weatherData.ok && shellState.weatherData.stale ? "Cached city forecast · " : "City opt-in · ") + "No GPS lookup · <a href='https://open-meteo.com/'>Open-Meteo data · CC BY 4.0</a>"
                                 textFormat: Text.RichText
                                 color: "#736b85"; linkColor: shellState.violet
-                                font.family: "monospace"; font.pixelSize: 8
+                                font.family: "Iosevka Nerd Font"; font.pixelSize: 8
                                 onLinkActivated: launcherForWeather.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "browser", link])
+                            }
+                        }
+                    }
+                }
+            }
+
+            PopupWindow {
+                id: bluetoothPopup
+                color: "transparent"
+                surfaceFormat.opaque: false
+                anchor.item: bluetoothButton
+                anchor.edges: Edges.Bottom | Edges.HCenter
+                anchor.gravity: Edges.Bottom | Edges.HCenter
+                anchor.margins.bottom: 0
+                implicitWidth: Math.min(320, Math.max(280, barWindow.screen.width - 24))
+                implicitHeight: Math.min(360, barWindow.screen.height - 48)
+                visible: barWindow.openPanel === "bluetooth"
+                grabFocus: visible
+                onVisibleChanged: if (!visible) barWindow.closePanel("bluetooth")
+                FluidPanel {
+                    anchors.fill: parent
+                    attachmentX: width * 0.5
+                    focus: true
+                    Keys.onEscapePressed: function(event) { barWindow.closePanel("bluetooth"); event.accepted = true; }
+                    ColumnLayout {
+                        anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 21; spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 2
+                                Text { text: "BLUETOOTH / DEVICES"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.7 }
+                                Text {
+                                    text: Bluetooth.defaultAdapter ? Bluetooth.defaultAdapter.name + " · " + (Bluetooth.defaultAdapter.enabled ? "ready" : "off") : "No Bluetooth adapter detected"
+                                    color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; elide: Text.ElideRight
+                                }
+                            }
+                            Button {
+                                text: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? "Power off" : "Power on"
+                                enabled: Bluetooth.defaultAdapter !== null
+                                onClicked: if (Bluetooth.defaultAdapter) Bluetooth.defaultAdapter.enabled = !Bluetooth.defaultAdapter.enabled
+                                background: Rectangle { radius: 8; color: parent.enabled ? "#d8f55a" : shellState.raised }
+                                contentItem: Text { text: parent.text; color: parent.enabled ? shellState.ink : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; font.bold: true; padding: 6; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                Layout.fillWidth: true
+                                text: Bluetooth.defaultAdapter ? (Bluetooth.defaultAdapter.discovering ? "Searching for nearby devices…" : "Paired and nearby devices") : "Turn on an adapter to manage devices."
+                                color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8
+                            }
+                            Button {
+                                text: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.discovering ? "Stop scan" : "Find devices"
+                                enabled: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled
+                                onClicked: if (Bluetooth.defaultAdapter) Bluetooth.defaultAdapter.discovering = !Bluetooth.defaultAdapter.discovering
+                                background: Rectangle { radius: 8; color: shellState.raised; border.color: shellState.edge; border.width: 1 }
+                                contentItem: Text { text: parent.text; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; padding: 6; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                            }
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
+                        ListView {
+                            id: bluetoothDevices
+                            Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6
+                            model: Bluetooth.defaultAdapter ? Bluetooth.defaultAdapter.devices.values : []
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: bluetoothDevices.width; height: 64; radius: 9
+                                color: modelData.connected ? "#252b25" : "#171c20"
+                                border.color: modelData.connected ? "#7e9e4d" : shellState.edge; border.width: 1
+                                RowLayout {
+                                    anchors.fill: parent; anchors.margins: 9; spacing: 7
+                                    ColumnLayout {
+                                        Layout.fillWidth: true; spacing: 3
+                                        Text { Layout.fillWidth: true; text: modelData.name || modelData.deviceName || "Bluetooth device"; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; elide: Text.ElideRight }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.connected ? "CONNECTED" : (modelData.pairing ? "PAIRING…" : (modelData.paired ? "PAIRED · READY TO CONNECT" : "NEARBY · NOT PAIRED")) + (modelData.batteryAvailable ? " · " + Math.round(modelData.battery * 100) + "%" : "")
+                                            color: modelData.connected ? shellState.chartreuse : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; elide: Text.ElideRight
+                                        }
+                                    }
+                                    Button {
+                                        text: modelData.connected ? "Disconnect" : (modelData.pairing ? "Cancel" : (modelData.paired ? "Connect" : "Pair"))
+                                        enabled: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled
+                                        onClicked: {
+                                            if (modelData.connected) modelData.disconnect();
+                                            else if (modelData.pairing) modelData.cancelPair();
+                                            else if (modelData.paired) modelData.connect();
+                                            else modelData.pair();
+                                        }
+                                        background: Rectangle { radius: 7; color: parent.enabled ? "#d8f55a" : shellState.raised }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? shellState.ink : shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; font.bold: true; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                    }
+                                    Button {
+                                        visible: modelData.paired && !modelData.connected
+                                        text: "Forget"
+                                        onClicked: modelData.forget()
+                                        background: Rectangle { radius: 7; color: "#26262b" }
+                                        contentItem: Text { text: parent.text; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                    }
+                                }
+                            }
+                            footer: Text {
+                                visible: bluetoothDevices.count === 0
+                                text: Bluetooth.defaultAdapter && Bluetooth.defaultAdapter.enabled ? "No devices yet. Choose Find devices to scan." : "No adapter is available. Check that BlueZ is running."
+                                color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; wrapMode: Text.Wrap; padding: 10
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text { Layout.fillWidth: true; text: "For PIN-based pairing or advanced options:"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; wrapMode: Text.Wrap }
+                            Button {
+                                text: "Open settings"
+                                onClicked: barWindow.appCommand("bluetooth-settings")
+                                background: Rectangle { radius: 7; color: shellState.raised }
+                                contentItem: Text { text: parent.text; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; padding: 5; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                         }
                     }
@@ -1171,26 +1317,25 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: 300; implicitHeight: 270
-                visible: barWindow.openPanel === "settings" || barWindow.closingPanel === "settings"
+                visible: barWindow.openPanel === "settings"
                 grabFocus: barWindow.openPanel === "settings"
                 onVisibleChanged: if (!visible) barWindow.closePanel("settings")
                 FluidPanel {
                     anchors.fill: parent
-                    animationEnabled: barWindow.openPanel === "settings"
                     attachmentX: width * 0.5
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("settings"); event.accepted = true; }
                     ColumnLayout {
                         anchors.fill: parent; anchors.margins: 14; anchors.topMargin: 21; spacing: 8
-                        Text { text: "CORVANTIUM / SESSION"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1 }
-                        Text { text: "An independent Hyprland profile"; color: shellState.text; font.pixelSize: 12; font.bold: true }
-                        Text { Layout.fillWidth: true; text: "This session uses its own files under ~/.config/corvantium. The existing Hyprland and Serpantinum configuration trees remain separate."; color: shellState.muted; font.pixelSize: 9; wrapMode: Text.Wrap }
+                        Text { text: "CORVANTIUM / FIELD NOTES"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.7 }
+                        Text { text: "Focus, flow, and signal."; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 12; font.bold: true }
+                        Text { Layout.fillWidth: true; text: "A quiet system surface for the things you check most. Move between fields, follow a track, or tune your connections."; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
-                        Text { text: "CONNECTIONS"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
+                        Text { text: "CONNECTIONS"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
                         Text { text: Networking.devices.values.some(d => d.connected) ? "NetworkManager: connected" : "NetworkManager: disconnected / unavailable"; color: shellState.text; font.pixelSize: 10 }
                         Text { text: Bluetooth.defaultAdapter ? (Bluetooth.defaultAdapter.enabled ? "Bluetooth adapter: on · " + Bluetooth.devices.values.length + " connected" : "Bluetooth adapter: off") : "Bluetooth adapter: unavailable"; color: shellState.text; font.pixelSize: 10 }
-                        Text { text: "CAMERA PRIVACY"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.letterSpacing: 1 }
-                        Text { Layout.fillWidth: true; text: barWindow.cameraStatus; color: shellState.text; font.family: "monospace"; font.pixelSize: 9; wrapMode: Text.Wrap }
+                        Text { text: "CAMERA PRIVACY"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
+                        Text { Layout.fillWidth: true; text: barWindow.cameraStatus; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Text { Layout.fillWidth: true; text: "Only a reported V4L2 physical privacy control can be toggled. Software app permission is not represented as a hardware shutter."; color: shellState.muted; font.pixelSize: 9; wrapMode: Text.Wrap }
                         Button {
                             text: "Toggle detected V4L2 control"
@@ -1199,7 +1344,7 @@ ShellRoot {
                             contentItem: Text { text: parent.text; color: shellState.violet; font.pixelSize: 10; padding: 6; horizontalAlignment: Text.AlignHCenter }
                         }
                         Item { Layout.fillHeight: true }
-                        Text { text: Quickshell.shellDir; color: "#736b85"; font.family: "monospace"; font.pixelSize: 8; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                        Text { text: Quickshell.shellDir; color: "#736b85"; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; elide: Text.ElideMiddle; Layout.fillWidth: true }
                     }
                 }
             }
@@ -1230,9 +1375,8 @@ ShellRoot {
             FluidPanel {
                 id: overlayCard
                 z: 1
-                animationEnabled: overlayWindow.visible
                 width: Math.min(360, overlayWindow.screen.width - 32)
-                height: Math.min(250, overlayWindow.screen.height - 72)
+                height: Math.min(300, overlayWindow.screen.height - 72)
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.top: parent.top
                 anchors.topMargin: 50
@@ -1244,10 +1388,10 @@ ShellRoot {
                     RowLayout {
                         ColumnLayout {
                             Layout.fillWidth: true; spacing: 3
-                            Text { text: "CORVANTIUM / QUICK OVERLAY"; color: shellState.chartreuse; font.family: "monospace"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.2 }
+                            Text { text: "CORVANTIUM / QUICK OVERLAY"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.bold: true; font.letterSpacing: 1.2 }
                             Text { text: "Controls at a glance."; color: shellState.text; font.pixelSize: 15; font.bold: true }
                         }
-                        Text { text: shellState.nowTime; color: "#9ad9e2"; font.family: "monospace"; font.pixelSize: 14; font.bold: true }
+                        Text { text: shellState.nowTime; color: "#9ad9e2"; font.family: "Iosevka Nerd Font"; font.pixelSize: 14; font.bold: true }
                     }
                     Rectangle { Layout.fillWidth: true; height: 1; color: shellState.edge }
                     GridLayout {
@@ -1260,7 +1404,8 @@ ShellRoot {
                                 { title: "Sound devices", detail: "Outputs and inputs", action: "audio" },
                                 { title: "Now playing", detail: "Track, controls, lyrics", action: "media" },
                                 { title: "Calendar & weather", detail: "Date and forecast", action: "calendar" },
-                                { title: "Wi-Fi & settings", detail: "Connections and controls", action: "wifi" }
+                                { title: "Wi-Fi & settings", detail: "Connections and controls", action: "wifi" },
+                                { title: "Wallpaper", detail: "Choose a desktop backdrop", action: "wallpaper" }
                             ]
                             delegate: Button {
                                 id: actionCard
@@ -1268,36 +1413,36 @@ ShellRoot {
                                 Layout.fillWidth: true; Layout.fillHeight: true
                                 onClicked: {
                                     shellState.overlayOpen = false;
-                                    if (modelData.action === "screen-search" || modelData.action === "music-identify") shellState.launchAction(modelData.action);
+                                    if (modelData.action === "screen-search" || modelData.action === "music-identify" || modelData.action === "wallpaper") shellState.launchAction(modelData.action);
                                     else shellState.requestedPanel = modelData.action;
                                 }
                                 background: Rectangle { radius: 12; color: parent.down ? "#35454a" : "#851a2327"; border.color: "#557b969a"; border.width: 1 }
                                 contentItem: ColumnLayout {
                                     anchors.fill: parent; anchors.margins: 9; spacing: 3
                                     Text { text: actionCard.modelData.title; color: shellState.text; font.pixelSize: 10; font.bold: true; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                                    Text { text: actionCard.modelData.detail; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                                    Text { text: actionCard.modelData.detail; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7; wrapMode: Text.Wrap; Layout.fillWidth: true }
                                 }
                             }
                         }
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 4
-                        Text { text: "WORKSPACES"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
+                        Text { text: "WORKSPACES"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7 }
                         Repeater {
                             model: 10
                             delegate: Button {
                                 required property int index
                                 Layout.fillWidth: true; Layout.preferredHeight: 23
                                 onClicked: {
-                                    Hyprland.dispatch(Hyprland.usingLua ? "hl.dsp.focus({ workspace = " + (index + 1) + " })" : "workspace " + (index + 1));
+                                    Hyprland.dispatch(Hyprland.usingLua ? "hl.dsp.focus({ workspace = \"" + (index + 1) + "\" })" : "workspace " + (index + 1));
                                     shellState.overlayOpen = false;
                                 }
-                                contentItem: Text { text: String(index + 1); color: shellState.text; font.family: "monospace"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                contentItem: Text { text: String(index + 1); color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                                 background: Rectangle { radius: 8; color: Hyprland.focusedWorkspace && Hyprland.focusedWorkspace.id === index + 1 ? "#82cad6" : "#851a2327"; border.color: shellState.edge; border.width: 1 }
                             }
                         }
                     }
-                    Text { text: "SUPER + /  KEYBIND GUIDE     ·     ESC  CLOSE"; color: shellState.muted; font.family: "monospace"; font.pixelSize: 7 }
+                    Text { text: "SUPER + /  KEYBIND GUIDE     ·     ESC  CLOSE"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 7 }
                 }
             }
         }

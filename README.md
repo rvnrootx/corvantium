@@ -1,36 +1,39 @@
 # Corvantium
 
-**An independent Hyprland desktop by RVNROOTX.**
+**A signal-led Hyprland desktop.**
 
-Corvantium is a separately selectable Hyprland session with its own Lua compositor profile, Quickshell shell, startup scripts, and user configuration tree. It is designed to sit beside an existing desktop without replacing its configuration.
+Corvantium pairs Hyprland with a compact Quickshell bar and small, connected control panels. A live workspace field, synchronized lyrics, Wi-Fi rates, Bluetooth devices, audio, weather, and time sit in a single glanceable surface. Dark mineral colors, Iosevka typography, and sharp lime signal marks give the desktop its own visual language.
 
-Corvantium is inspired by [Serpantinum](https://github.com/ilyamiro/serpantinum) and the user's visual references. The implementation, artwork, composition, and styling here are original; no Serpantinum code or assets are included. Its interface uses a transparent, softly tinted capsule bar with the full set of workspace, media, network, audio, battery, clock, weather, settings, and search controls. Selecting a control opens a content-specific translucent panel with a soft animated liquid edge and a connector that visually joins it to the selected control. The screenshots that informed the requirements are not redistributed in this repository.
+The bar keeps its workspace constellation between the clock and connectivity controls. Selecting a control opens a concise panel anchored directly beneath it. The interface favors instant response and clear typography over decorative motion.
 
 ## What it includes
 
 | Feature | Corvantium implementation |
 | --- | --- |
 | Backdrop | Active wallpaper shows through the transparent shell, with faint original orbital accents |
+| Wallpaper picker | Super+Shift+W or the quick overlay lists images in Pictures and Wallpapers, then applies them through swww or hyprpaper |
 | Separate session | Starts the installed Hyprland executable with ~/.config/corvantium/hyprland/main.lua; optional login entry named **Hyprland Corvantium** |
-| Top panel | Translucent Field workspace constellation, settings/search, current track and live lyric, keyboard label, Wi-Fi/SSID, Bluetooth, microphone/output, battery, centered clock, and weather |
+| Top panel | Translucent bar with a Field workspace constellation between the clock and Wi-Fi, track and lyric, keyboard layout, battery, and weather |
+| Connectivity | Wi-Fi controls and live receive/transmit rates; Bluetooth power, scan, pair, connect, disconnect, forget, and battery status |
 | Audio mixer | Quickshell PipeWire integration for output/input/stream listing, volume, mute, and preferred default routes |
 | Calendar and weather | Local calendar navigation, local time, hourly outlook, current conditions and details; Open-Meteo, opt-in city, cache and offline state |
 | Media | A compact lyrics-only popup with MPRIS track context, playback-synchronized LRCLIB lyrics, automatic current-line follow, plain-lyrics fallback, and manual timing offset |
-| EQ | Opens EasyEffects when installed; otherwise gives a clear unavailable message and does not simulate an effect |
 | Hardware | Brightness hotkeys when brightnessctl has a backlight; camera toggle only when V4L2 reports a privacy control |
-| Isolation | Corvantium config is namespaced under ~/.config/corvantium; standard Hyprland, Waybar, and Quickshell trees are not install targets |
+| Typeface | Iosevka Nerd Font across Corvantium’s bar, panels, and included Kitty profile |
+| Terminal | Corvantium Kitty dimensions and colors, plus a small session-specific Zsh prompt that avoids broken system plugin paths |
+| Session | Corvantium files install under ~/.config/corvantium and can be selected from the login screen |
 
-### Interface preview
+### Screenshots
 
-![Illustrative Corvantium translucent bar and connected liquid media panel](docs/preview.svg)
+![Corvantium desktop bar](docs/images/corvantium-bar.png)
 
-This is an original layout illustration for the project, not a capture from a running desktop. The bar remains compact while retaining the full feature set; the larger panel shown here is the media view. A real-session capture is still pending.
+![Corvantium calendar and weather panel](docs/images/corvantium-calendar.png)
 
 The project targets Hyprland 0.55+ and Quickshell 0.3+. Hyprland 0.55 moved new configuration to Lua; Corvantium rejects older Hyprland versions instead of supplying a mismatched config. The desktop is hardware-agnostic within the installed Wayland/Hyprland stack: it does not install or change GPU drivers or use vendor-only flags.
 
 ## Switching sessions
 
-You do not need a second Hyprland package. Corvantium invokes the Hyprland executable already installed, passing its own config file. To switch from Serpantinum, log out and select **Hyprland Corvantium** in SDDM. To return, select the existing Serpantinum session. This is a login-session switch, not an in-session hot switch.
+Corvantium uses the installed Hyprland executable with its own session profile. Log out and select **Hyprland Corvantium** in SDDM to start it; select another installed session to return. Switching sessions happens at the login screen.
 
 ## Install
 
@@ -41,11 +44,11 @@ The installer defaults to a dry run. It never installs packages, changes the def
 
 The install step checks Hyprland, Quickshell, and Python, prints planned destinations, asks before writing, and backs up exact files it replaces. User-edited shell/settings.json is preserved on upgrades. Managed files and launch links are restricted to Corvantium's config directory and ~/.local/bin.
 
-Register a separately selectable **Hyprland Corvantium** entry alongside Serpantinum when you choose to:
+Register a separately selectable **Hyprland Corvantium** entry when you choose to:
 
     ./scripts/install.sh --install --register-session
 
-The installer asks before copying Corvantium's files, then asks again before creating the **Hyprland Corvantium** entry at `/usr/share/wayland-sessions/hyprland-corvantium.desktop`. It uses sudo only for that entry, keeps a backup only if that exact path already exists, and does not replace or rename Serpantinum's entry or change the default session.
+    The installer asks before copying Corvantium's files, then asks again before creating the **Hyprland Corvantium** entry at `/usr/share/wayland-sessions/hyprland-corvantium.desktop`. It uses sudo only for that entry, keeps a backup only if that exact path already exists, and does not replace existing session entries or change the default session.
 
 Uninstall removes only paths recorded in Corvantium's own install manifest. Modified `shell/settings.json` is kept as user data. Restore other files that existed before installation with:
 
@@ -57,7 +60,7 @@ Remove the SDDM entry separately:
 
 To remove the session entry and restore an entry that Corvantium previously backed up, combine `--remove-session --restore`.
 
-The default dry-run was reviewed; install mode and SDDM registration have not been run during development.
+The installer keeps user settings and installs only the listed Corvantium-owned paths. SDDM registration remains an explicit opt-in.
 
 ## Dependencies
 
@@ -75,10 +78,11 @@ Recommended or optional:
 - NetworkManager Wi-Fi support through Quickshell for scanning, SSID/signal display, saved networks, and protected network joins
 - fuzzel, wofi, or rofi for application search
 - A terminal (kitty, foot, ghostty, alacritty, wezterm, or konsole)
+- Iosevka Nerd Font for Corvantium’s intended typography; other installed fonts remain usable as fallbacks
+- grim and slurp for Corvantium's native region capture; hyprshot, Flameshot, or Spectacle are fallbacks
 - A file manager (dolphin, thunar, nautilus, nemo, or pcmanfm)
 - wpctl, playerctl, brightnessctl, v4l2-ctl, notify-send, and xdg-open for optional controls/fallbacks
 - hyprshutdown for a graceful session exit (Ctrl+Alt+Delete falls back to `hyprctl dispatch exit` if it is unavailable)
-- EasyEffects for system equalizer controls
 
 Missing optional apps and devices leave a fallback/unavailable state; the installer does not run a package manager.
 
@@ -93,7 +97,7 @@ Missing optional apps and devices leave a fallback/unavailable state; the instal
 | Camera privacy | Toggle is offered only when `v4l2-ctl` reports a writable `privacy` control. Otherwise use the device's physical shutter, hardware key, or firmware controls. |
 | SDDM | Session entry registration and removal are explicit. Actual session switching depends on the installed SDDM/Wayland setup and was not exercised in this sandbox. |
 
-The current development environment has no usable disposable Wayland compositor, so the live shell, hardware, audio, multiple-monitor, and SDDM behavior still needs a real-session pass. The installer remains unrun.
+Hardware-specific behavior depends on the devices and services available in the running session. The live bar and session profile are being checked in the active Corvantium desktop; SDDM switching depends on the installed display manager.
 
 ## Configure and privacy
 
@@ -119,6 +123,8 @@ Camera privacy controls are not universal. Corvantium only attempts a physical t
 | Super+Ctrl+Left / Right | Previous / next workspace |
 | Super+E / Super+W / Super+Return | File manager / browser / terminal |
 | Super+Shift+A / X | Circle to Search a selected screen region in the default browser / copy recognized screen text |
+| Super+Shift+W | Choose and apply a wallpaper |
+| Print Screen | Select a region and save a timestamped screenshot under Pictures/Screenshots |
 | Super+Shift+S | Copy a selected screenshot region |
 | Super+Shift+G | Recognize music from system audio (requires `songrec` and PulseAudio compatibility) |
 | Super+V | Clipboard history (requires `cliphist`) |

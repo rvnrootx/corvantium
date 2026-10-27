@@ -4,13 +4,7 @@ local home = os.getenv("HOME") or ""
 local xdg = os.getenv("XDG_CONFIG_HOME") or (home .. "/.config")
 local root = os.getenv("CORVANTIUM_CONFIG_HOME")
 if not root then
-    local direct = io.open(xdg .. "/hyprland/main.lua", "r")
-    if direct then
-        direct:close()
-        root = xdg
-    else
-        root = xdg .. "/corvantium"
-    end
+    root = xdg .. "/corvantium"
 end
 
 local function quote(value)
@@ -44,7 +38,7 @@ hl.config({
     -- Keep legacy XWayland surfaces crisp on this 1.5x display. This is scoped
     -- to Corvantium; the user's primary Hyprland profile is not modified.
     xwayland = { force_zero_scaling = true },
-    animations = { enabled = true },
+    animations = { enabled = false },
     dwindle = { preserve_split = true },
     misc = {
         disable_hyprland_logo = true,
@@ -89,21 +83,27 @@ hl.bind("SUPER + SHIFT + G", command(root .. "/scripts/corvantium-launch music-i
 hl.bind("SUPER + SHIFT + S", command(root .. "/scripts/corvantium-launch screen-screenshot"), {
     description = "Corvantium: capture a selected screen region",
 })
+hl.bind("SUPER + SHIFT + W", command(root .. "/scripts/corvantium-launch wallpaper"), {
+    description = "Corvantium: choose a wallpaper",
+})
+hl.bind("Print", command(root .. "/scripts/corvantium-launch screenshot"), {
+    description = "Corvantium: open the screenshot tool",
+})
 hl.bind("SUPER + V", command(root .. "/scripts/corvantium-launch clipboard"), { description = "Corvantium: clipboard history" })
 hl.bind("SUPER + SLASH", command(root .. "/scripts/corvantium-launch keybinds"), {
     description = "Corvantium: show keybindings",
 })
 
 for n = 1, 9 do
-    hl.bind("SUPER + " .. n, hl.dsp.focus({ workspace = n }), {
+    hl.bind("SUPER + " .. n, hl.dsp.focus({ workspace = tostring(n) }), {
         description = "Corvantium: switch to workspace " .. n,
     })
-    hl.bind("SUPER + SHIFT + " .. n, hl.dsp.window.move({ workspace = n, follow = false }), {
+    hl.bind("SUPER + SHIFT + " .. n, hl.dsp.window.move({ workspace = tostring(n), follow = false }), {
         description = "Corvantium: move window to workspace " .. n,
     })
 end
-hl.bind("SUPER + 0", hl.dsp.focus({ workspace = 10 }), { description = "Corvantium: switch to workspace 10" })
-hl.bind("SUPER + SHIFT + 0", hl.dsp.window.move({ workspace = 10, follow = false }), { description = "Corvantium: move window to workspace 10" })
+hl.bind("SUPER + 0", hl.dsp.focus({ workspace = "10" }), { description = "Corvantium: switch to workspace 10" })
+hl.bind("SUPER + SHIFT + 0", hl.dsp.window.move({ workspace = "10", follow = false }), { description = "Corvantium: move window to workspace 10" })
 for key, direction in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
     hl.bind("SUPER + " .. key, hl.dsp.focus({ direction = direction }), { description = "Corvantium: focus window " .. direction })
     hl.bind("SUPER + SHIFT + " .. key, hl.dsp.window.move({ direction = direction }), { description = "Corvantium: move window " .. direction })

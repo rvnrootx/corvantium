@@ -43,6 +43,23 @@ pick() {
 }
 
 case "${1:-}" in
+    screenshot)
+        if command -v grim >/dev/null 2>&1 && command -v slurp >/dev/null 2>&1; then
+            region="$(slurp 2>/dev/null)" || exit 0
+            [[ -n "$region" ]] || exit 0
+            directory="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"
+            mkdir -p -- "$directory"
+            output="$directory/Corvantium-$(date +%Y%m%d-%H%M%S).png"
+            grim -g "$region" "$output" || { notice 'Could not capture the selected region.'; exit 1; }
+            notice "Saved screenshot to $output"
+            exit 0
+        fi
+        if command -v hyprshot >/dev/null 2>&1; then exec hyprshot -m region; fi
+        if command -v flameshot >/dev/null 2>&1; then exec flameshot gui; fi
+        if command -v spectacle >/dev/null 2>&1; then exec spectacle; fi
+        notice 'Install Spectacle, Flameshot, hyprshot, or grim and slurp for screenshots.'
+        exit 1
+        ;;
     search)
         app="$(configured_app launcher fuzzel wofi rofi || true)"
         case "${app##*/}" in
@@ -120,13 +137,52 @@ case "${1:-}" in
         ;;
     terminal)
         app="$(configured_app terminal kitty foot ghostty alacritty wezterm konsole || true)"
-        if [[ -n "$app" ]]; then exec "$app"; fi
+        if [[ -n "$app" ]]; then
+            config_root="${CORVANTIUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/corvantium}"
+            zsh_config="$config_root/terminal/zsh"
+            if [[ "${app##*/}" == kitty && -r "$config_root/terminal/kitty.conf" ]]; then
+                exec env ZDOTDIR="$zsh_config" "$app" \
+                    --config "$config_root/terminal/kitty.conf" \
+                    --instance-group=corvantium --single-instance \
+                    --override initial_window_width=88c \
+                    --override initial_window_height=27c \
+                    --directory "$HOME"
+            fi
+            exec env ZDOTDIR="$zsh_config" "$app"
+        fi
         notice 'No supported terminal was found.'
         ;;
     effects)
         app="$(pick easyeffects || true)"
         if [[ -n "$app" ]]; then exec "$app"; fi
         notice 'EasyEffects is not installed. Corvantium leaves system equalization unchanged.'
+        ;;
+    wallpaper)
+        picker="$(pick fuzzel rofi wofi || true)"
+        [[ -n "$picker" ]] || { notice 'Install fuzzel, rofi, or wofi to choose a wallpaper.'; exit 1; }
+        candidates="$(find "$HOME/Pictures" "$HOME/Wallpapers" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null | head -n 500)"
+        [[ -n "$candidates" ]] || { notice 'Add image files under Pictures or Wallpapers first.'; exit 1; }
+        case "${picker##*/}" in
+            fuzzel) selected="$(printf '%s\n' "$candidates" | "$picker" --dmenu --prompt='Wallpaper  ›  ')" ;;
+            rofi) selected="$(printf '%s\n' "$candidates" | "$picker" -dmenu -p 'Wallpaper')" ;;
+            *) selected="$(printf '%s\n' "$candidates" | "$picker" --dmenu --prompt='Wallpaper')" ;;
+        esac
+        [[ -n "$selected" ]] || exit 0
+        if command -v swww >/dev/null 2>&1; then exec swww img "$selected" --transition-type none; fi
+        if command -v hyprpaper >/dev/null 2>&1; then
+            hyprctl hyprpaper preload "$selected" && hyprctl hyprpaper wallpaper ",$selected" && exit 0
+        fi
+        notice 'Install and start swww or hyprpaper to apply a selected wallpaper.'
+        exit 1
+        ;;
+    bluetooth-settings)
+        app="$(pick blueman-manager gnome-control-center systemsettings || true)"
+        case "${app##*/}" in
+            blueman-manager) exec "$app" ;;
+            gnome-control-center) exec "$app" bluetooth ;;
+            systemsettings) exec "$app" kcm_bluetooth ;;
+            *) notice 'Install blueman or a desktop settings app for advanced Bluetooth pairing.'; exit 1 ;;
+        esac
         ;;
     logout)
         if command -v hyprshutdown >/dev/null 2>&1; then exec hyprshutdown; fi
