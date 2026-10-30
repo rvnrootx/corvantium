@@ -50,6 +50,36 @@ class WeatherTests(unittest.TestCase):
             self.assertEqual(payload["status"], "disabled")
             self.assertFalse(payload["show_weather"])
 
+    def test_weather_location_not_configured_emits_graceful_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "settings.json"
+            config.write_text(json.dumps({"show_weather": True, "weather_location": ""}), encoding="utf-8")
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["weather.py", "--config", str(config)]), \
+                    patch.object(weather, "fetch_json") as fetch, \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(weather.main(), 0)
+            fetch.assert_not_called()
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "location-not-configured")
+            self.assertFalse(payload["ok"])
+
+    def test_weather_set_location_updates_config_and_invokes_forecast(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "settings.json"
+            config.write_text(json.dumps({"show_weather": True, "weather_location": ""}), encoding="utf-8")
+            output = io.StringIO()
+            mock_payload = {"ok": True, "status": "ok", "location": "Kyoto, Japan", "unit": "°C", "current": {}, "hourly": []}
+            with patch.object(sys, "argv", ["weather.py", "--config", str(config), "--set-location", "Kyoto"]), \
+                    patch.object(weather, "get_forecast", return_value=mock_payload), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(weather.main(), 0)
+            saved = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(saved.get("weather_location"), "Kyoto")
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["location"], "Kyoto, Japan")
+
 
 class LyricsTests(unittest.TestCase):
     def test_parse_lrc_sorts_and_expands_multiple_timestamps(self):

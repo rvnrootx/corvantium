@@ -43,6 +43,7 @@ Item {
     Item {
         id: contentLayer
         anchors.fill: parent
+        clip: true
         z: 1
     }
 }

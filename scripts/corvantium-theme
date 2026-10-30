@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wallpaper="$1"
+[[ -f "$wallpaper" ]] || exit 1
+
+# Generate colors using matugen
+# We want to output JSON that we can parse
+colors_json=$(matugen image "$wallpaper" --mode dark --type scheme-content -j)
+
+# Extract colors (using python since it's already used in the project)
+python3 - "$colors_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(sys.argv[1])
+    colors = data.get("colors", {}).get("dark", {})
+
+    # Map matugen colors to Corvantium shell properties
+    theme = {
+        "ink": colors.get("surface", "#0b0912"),
+        "panel": colors.get("surface_container", "#15121e"),
+        "raised": colors.get("surface_container_high", "#201b2b"),
+        "edge": colors.get("outline", "#3b3450"),
+        "text": colors.get("on_surface", "#f3f0e9"),
+        "muted": colors.get("on_surface_variant", "#a59db5"),
+        "chartreuse": colors.get("primary", "#d8f55a"),
+        "violet": colors.get("secondary", "#a88bfa")
+    }
+
+    config_path = Path.home() / ".config/corvantium/shell/settings.json"
+    if not config_path.parent.exists():
+        config_path = Path(__file__).parent.parent / "shell/settings.json"
+
+    if config_path.exists():
+        settings = json.loads(config_path.read_text())
+        settings["theme"] = theme
+        config_path.write_text(json.dumps(settings, indent=2))
+
+    # Also output for hyprland
+    print(f"hyprctl keyword general:col.active_border {theme['chartreuse']}")
+    print(f"hyprctl keyword general:col.inactive_border {theme['edge']}")
+
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+# Update Hyprland colors
+eval "$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); c=d.get('colors', {}).get('dark', {}); print(f'hyprctl keyword general:col.active_border \"rgb({c.get(\"primary\", \"d8f55a\")[1:]})\"'); print(f'hyprctl keyword general:col.inactive_border \"rgb({c.get(\"outline\", \"3b3450\")[1:]})\"')" "$colors_json")"
+
+# Notify shell to reload theme
+config_root="${CORVANTIUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/corvantium}"
+qs --path "$config_root/shell" ipc call corvantium reloadTheme || true

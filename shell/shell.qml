@@ -33,6 +33,8 @@ ShellRoot {
     property string keyboardLayout: "…"
     property bool overlayOpen: false
     property bool barVisible: true
+    property string activeScreenName: ""
+    property string activePanel: ""
     property string requestedPanel: ""
     property string networkSpeedText: "↓ — ↑ —"
     property string networkInterface: ""
@@ -44,8 +46,31 @@ ShellRoot {
         function toggleOverlay(): void { shellState.overlayOpen = !shellState.overlayOpen; }
         function closeOverlay(): void { shellState.overlayOpen = false; }
         function toggleBar(): void { shellState.barVisible = !shellState.barVisible; }
-        function toggleMedia(): void { shellState.requestedPanel = shellState.requestedPanel === "media" ? "" : "media"; }
-        function showPanel(panel: string): void { shellState.requestedPanel = panel; }
+        function toggleMedia(): void {
+            if (shellState.activePanel === "media") {
+                shellState.activePanel = "";
+            } else {
+                shellState.openPanelOnFocusedScreen("media");
+            }
+        }
+        function showPanel(panel: string): void {
+            shellState.openPanelOnFocusedScreen(panel);
+        }
+    }
+
+    function openPanelOnFocusedScreen(panel) {
+        const focused = Hyprland.focusedMonitor;
+        shellState.activeScreenName = focused ? focused.name : (Quickshell.screens.length > 0 ? Quickshell.screens[0].name : "");
+        shellState.activePanel = panel;
+    }
+
+    function saveWeatherCity(city) {
+        if (!city || city.trim().length === 0) return;
+        weatherProcess.exec([
+            "python3", Quickshell.shellDir + "/services/weather.py",
+            "--config", Quickshell.shellDir + "/settings.json",
+            "--set-location", city.trim()
+        ]);
     }
 
     Process { id: overlayActionProcess }
@@ -317,7 +342,9 @@ ShellRoot {
             exclusiveZone: 44
             color: "transparent"
 
-            property string openPanel: ""
+            readonly property bool isCurrentScreen: !shellState.activeScreenName || shellState.activeScreenName === barWindow.screen.name
+            property string openPanel: isCurrentScreen ? shellState.activePanel : ""
+            property bool editingWeatherCity: false
             property var settingsAnchor: null
             property var calendarAnchor: null
             property string audioTab: "outputs"
@@ -329,13 +356,17 @@ ShellRoot {
             property string wifiPassword: ""
 
             function togglePanel(name) {
-                openPanel = openPanel === name ? "" : name;
-                shellState.requestedPanel = openPanel;
+                if (shellState.activePanel === name && shellState.activeScreenName === barWindow.screen.name) {
+                    shellState.activePanel = "";
+                    shellState.activeScreenName = "";
+                } else {
+                    shellState.activeScreenName = barWindow.screen.name;
+                    shellState.activePanel = name;
+                }
             }
             function closePanel(name) {
-                if (openPanel === name) {
-                    openPanel = "";
-                    shellState.requestedPanel = "";
+                if (shellState.activePanel === name && shellState.activeScreenName === barWindow.screen.name) {
+                    shellState.activePanel = "";
                 }
             }
             function scanWifi() {
@@ -411,13 +442,6 @@ ShellRoot {
             Component.onCompleted: {
                 cameraStatusProcess.running = true;
                 calendarAnchor = clockButton;
-                openPanel = shellState.requestedPanel;
-            }
-            Connections {
-                target: shellState
-                function onRequestedPanelChanged() {
-                    barWindow.openPanel = shellState.requestedPanel;
-                }
             }
 
             Rectangle {
@@ -446,11 +470,24 @@ ShellRoot {
                     spacing: 5
                     ToolButton {
                         id: launcherButton
-                        text: "🐧"
                         onClicked: barWindow.appCommand("search")
                         Layout.preferredWidth: 32; Layout.preferredHeight: 32
-                        background: Rectangle { color: parent.hovered ? shellState.raised : "transparent"; radius: 10; }
-                        contentItem: Text { text: parent.text; font.pixelSize: 17; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        background: Rectangle {
+                            color: parent.down ? shellState.edge : (parent.hovered ? shellState.raised : "transparent")
+                            radius: 10
+                        }
+                        contentItem: Item {
+                            anchors.fill: parent
+                            Image {
+                                anchors.centerIn: parent
+                                width: 20
+                                height: 20
+                                sourceSize.width: 48
+                                sourceSize.height: 48
+                                fillMode: Image.PreserveAspectFit
+                                source: Quickshell.shellDir + "/assets/arch-logo.svg"
+                            }
+                        }
                     }
                     ToolButton {
                         id: mediaButton
@@ -686,8 +723,8 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "audio"
-                grabFocus: barWindow.openPanel === "audio"
+                visible: barWindow.openPanel === "audio" && barWindow.isCurrentScreen
+                grabFocus: visible
                 onVisibleChanged: if (!visible) barWindow.closePanel("audio")
                 FluidPanel {
                     anchors.fill: parent
@@ -807,8 +844,8 @@ ShellRoot {
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(300, Math.max(270, barWindow.screen.width - 24))
                 implicitHeight: Math.min(320, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "wifi"
-                grabFocus: barWindow.openPanel === "wifi"
+                visible: barWindow.openPanel === "wifi" && barWindow.isCurrentScreen
+                grabFocus: visible
                 onVisibleChanged: {
                     if (visible) barWindow.scanWifi();
                     else barWindow.closePanel("wifi");
@@ -956,8 +993,8 @@ ShellRoot {
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(360, Math.max(290, barWindow.screen.width - 24))
                 implicitHeight: Math.min(330, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "media"
-                grabFocus: barWindow.openPanel === "media"
+                visible: barWindow.openPanel === "media" && barWindow.isCurrentScreen
+                grabFocus: visible
                 onVisibleChanged: if (!visible) barWindow.closePanel("media")
                 FluidPanel {
                     anchors.fill: parent
@@ -1068,101 +1105,384 @@ ShellRoot {
                 id: calendarPopup
                 color: "transparent"
                 surfaceFormat.opaque: false
-                anchor.item: barWindow.calendarAnchor
+                anchor.item: barWindow.calendarAnchor || clockButton
                 anchor.edges: Edges.Bottom | Edges.HCenter
                 anchor.gravity: Edges.Bottom | Edges.HCenter
-                anchor.margins.bottom: 0
-                implicitWidth: Math.min(500, Math.max(300, barWindow.screen.width - 24)); implicitHeight: Math.min(310, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "calendar"
-                grabFocus: barWindow.openPanel === "calendar"
-                onVisibleChanged: if (!visible) barWindow.closePanel("calendar")
+                anchor.margins.top: 0
+                implicitWidth: Math.min(680, Math.max(340, barWindow.screen.width - 24))
+                implicitHeight: Math.min(380, Math.max(320, barWindow.screen.height - 56))
+                visible: barWindow.openPanel === "calendar" && barWindow.isCurrentScreen
+                grabFocus: visible
+                onVisibleChanged: if (!visible) {
+                    barWindow.closePanel("calendar");
+                    barWindow.editingWeatherCity = false;
+                }
                 FluidPanel {
+                    id: calendarFluidPanel
                     anchors.fill: parent
-                    attachmentX: width * 0.5
+                    attachmentX: {
+                        const target = barWindow.calendarAnchor || clockButton;
+                        if (target) {
+                            try {
+                                const pt = target.mapToItem(calendarFluidPanel, target.width * 0.5, 0);
+                                return Math.max(24, Math.min(width - 54, pt.x));
+                            } catch (e) {}
+                        }
+                        return width * 0.5;
+                    }
                     focus: true
                     Keys.onEscapePressed: function(event) { barWindow.closePanel("calendar"); event.accepted = true; }
                     RowLayout {
-                        anchors.fill: parent; anchors.margins: 16; anchors.topMargin: 21; spacing: 12
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        anchors.topMargin: 18
+                        spacing: 14
+
                         ColumnLayout {
-                            Layout.preferredWidth: Math.min(270, Math.max(150, (calendarPopup.width - 64) * 0.38)); Layout.fillHeight: true; spacing: 12
+                            Layout.preferredWidth: Math.min(270, Math.max(210, (calendarPopup.width - 44) * 0.38))
+                            Layout.fillHeight: true
+                            spacing: 8
+
                             RowLayout {
-                                ToolButton { text: "‹"; onClicked: barWindow.changeMonth(-1); contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 20; horizontalAlignment: Text.AlignHCenter } }
-                                Text { Layout.fillWidth: true; text: Qt.formatDate(new Date(barWindow.monthYear, barWindow.monthIndex, 1), "MMMM yyyy").toUpperCase(); color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 11; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                                ToolButton { text: "›"; onClicked: barWindow.changeMonth(1); contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 20; horizontalAlignment: Text.AlignHCenter } }
+                                Layout.fillWidth: true
+                                ToolButton {
+                                    text: "‹"
+                                    Layout.preferredWidth: 26
+                                    Layout.preferredHeight: 26
+                                    onClicked: barWindow.changeMonth(-1)
+                                    background: Rectangle { radius: 8; color: parent.hovered ? shellState.raised : "transparent" }
+                                    contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: Qt.formatDate(new Date(barWindow.monthYear, barWindow.monthIndex, 1), "MMMM yyyy").toUpperCase()
+                                    color: shellState.text
+                                    font.family: "Iosevka Nerd Font"
+                                    font.pixelSize: 10
+                                    font.bold: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
+                                ToolButton {
+                                    text: "›"
+                                    Layout.preferredWidth: 26
+                                    Layout.preferredHeight: 26
+                                    onClicked: barWindow.changeMonth(1)
+                                    background: Rectangle { radius: 8; color: parent.hovered ? shellState.raised : "transparent" }
+                                    contentItem: Text { text: parent.text; color: shellState.text; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                }
                             }
+
                             GridLayout {
-                                Layout.fillWidth: true; columns: 7; rowSpacing: 5; columnSpacing: 3
+                                Layout.fillWidth: true
+                                columns: 7
+                                rowSpacing: 3
+                                columnSpacing: 3
+
                                 Repeater {
                                     model: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
-                                    delegate: Text { required property string modelData; text: modelData; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
+                                    delegate: Text {
+                                        required property string modelData
+                                        text: modelData
+                                        color: shellState.muted
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 8
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignHCenter
+                                        Layout.fillWidth: true
+                                    }
                                 }
                                 Repeater {
                                     model: 42
                                     delegate: ToolButton {
                                         required property int index
                                         readonly property var cellDate: barWindow.dateForCell(index)
-                                        Layout.fillWidth: true; Layout.preferredHeight: 31
+                                        readonly property bool isSelected: cellDate.toDateString() === barWindow.pickedDate.toDateString()
+                                        readonly property bool isToday: cellDate.toDateString() === new Date().toDateString()
+                                        readonly property bool isCurrentMonth: cellDate.getMonth() === barWindow.monthIndex
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 24
                                         text: String(cellDate.getDate())
                                         onClicked: barWindow.pickedDate = cellDate
                                         background: Rectangle {
-                                            radius: 12
-                                            color: cellDate.toDateString() === barWindow.pickedDate.toDateString() ? shellState.chartreuse : "transparent"
-                                            border.color: cellDate.toDateString() === new Date().toDateString() ? shellState.violet : "transparent"
-                                            border.width: 1
+                                            radius: 7
+                                            color: isSelected ? shellState.chartreuse : (parent.hovered ? shellState.raised : "transparent")
+                                            border.color: isToday ? shellState.violet : "transparent"
+                                            border.width: isToday ? 1 : 0
                                         }
                                         contentItem: Text {
                                             text: parent.text
-                                            color: cellDate.getMonth() === barWindow.monthIndex ? (cellDate.toDateString() === barWindow.pickedDate.toDateString() ? shellState.ink : shellState.text) : "#736b85"
-                                            font.family: "Iosevka Nerd Font"; font.pixelSize: 10; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                            color: isSelected ? shellState.ink : (isCurrentMonth ? shellState.text : "#736b85")
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: 9
+                                            font.bold: isSelected || isToday
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
                                         }
                                     }
                                 }
                             }
+
                             Item { Layout.fillHeight: true }
+
                             Rectangle {
-                                Layout.fillWidth: true; Layout.preferredHeight: 72; color: shellState.raised; radius: 14
-                                Column {
-                                    anchors.centerIn: parent; spacing: 3
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: shellState.nowTime; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 24; font.bold: true }
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDate(barWindow.pickedDate, "dddd · dd MMMM yyyy"); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9 }
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 34
+                                color: shellState.raised
+                                radius: 10
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 10
+                                    spacing: 6
+                                    Text {
+                                        text: "●"
+                                        color: shellState.chartreuse
+                                        font.pixelSize: 9
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: Qt.formatDate(barWindow.pickedDate, "dddd · dd MMMM yyyy")
+                                        color: shellState.text
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
                                 }
                             }
                         }
-                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: shellState.edge }
+
+                        Rectangle {
+                            Layout.preferredWidth: 1
+                            Layout.fillHeight: true
+                            color: shellState.edge
+                        }
+
                         ColumnLayout {
-                            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 13
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 8
+
                             RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+
                                 ColumnLayout {
-                                    Layout.fillWidth: true; spacing: 4
-                                    Text { text: "FORECAST / LOCAL TIME"; color: shellState.chartreuse; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
-                                    Text { text: shellState.nowTime; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 28; font.bold: true }
-                                    Text { text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy"); color: shellState.muted; font.pixelSize: 11 }
-                                }
-                                ColumnLayout {
-                                    Layout.preferredWidth: 170; spacing: 3
-                                    Text { text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 26; font.bold: true; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
-                                    Text { text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"; color: shellState.text; font.pixelSize: 11; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true }
-                                    Text { text: shellState.weatherData.location || shellState.weatherData.message || "Set a city in settings"; color: shellState.muted; font.pixelSize: 9; horizontalAlignment: Text.AlignRight; Layout.fillWidth: true; elide: Text.ElideRight }
-                                }
-                            }
-                            Text { text: "NEXT HOURS"; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; font.letterSpacing: 1 }
-                            ListView {
-                                Layout.fillWidth: true; Layout.preferredHeight: 112; orientation: ListView.Horizontal; spacing: 7; clip: true
-                                model: shellState.weatherData.hourly || []
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    width: 76; height: 96; radius: 14; color: shellState.raised; border.color: shellState.edge; border.width: 1
-                                    Column {
-                                        anchors.centerIn: parent; spacing: 7
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: barWindow.timeLabel(modelData.time); color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9 }
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°"); color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 14; font.bold: true }
-                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: (modelData.precipitation_probability || 0) + "% rain"; color: shellState.violet; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        text: "FORECAST / LOCAL TIME"
+                                        color: shellState.chartreuse
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        font.letterSpacing: 0.8
+                                    }
+                                    Text {
+                                        text: shellState.nowTime
+                                        color: shellState.text
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 26
+                                        font.bold: true
+                                    }
+                                    Text {
+                                        text: Qt.formatDate(new Date(), "dddd, dd MMMM yyyy")
+                                        color: shellState.muted
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 10
                                     }
                                 }
-                                footer: Text { visible: !shellState.weatherData.ok; text: shellState.weatherData.message || "No forecast data. Configure a city in shell/settings.json."; color: shellState.muted; font.pixelSize: 10; padding: 8 }
+
+                                ColumnLayout {
+                                    Layout.preferredWidth: Math.min(220, Math.max(160, parent.width * 0.45))
+                                    spacing: 2
+                                    Text {
+                                        text: shellState.weatherData.ok ? Math.round(shellState.weatherData.current.temperature) + shellState.weatherData.unit : "—"
+                                        color: shellState.violet
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 24
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Text {
+                                        text: shellState.weatherData.ok ? barWindow.weatherText(shellState.weatherData.current.weather_code) : "Weather unavailable"
+                                        color: shellState.text
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Item { Layout.fillWidth: true }
+                                        Text {
+                                            text: shellState.weatherData.location || (shellState.weatherData.ok ? "Configured" : "City unconfigured")
+                                            color: shellState.muted
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: 9
+                                            horizontalAlignment: Text.AlignRight
+                                            elide: Text.ElideRight
+                                            Layout.maximumWidth: 160
+                                        }
+                                        ToolButton {
+                                            text: barWindow.editingWeatherCity ? "×" : "✎"
+                                            Layout.preferredWidth: 20
+                                            Layout.preferredHeight: 20
+                                            background: Rectangle { radius: 6; color: parent.hovered ? shellState.raised : "transparent" }
+                                            contentItem: Text { text: parent.text; color: shellState.chartreuse; font.pixelSize: 11; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                            onClicked: barWindow.editingWeatherCity = !barWindow.editingWeatherCity
+                                        }
+                                    }
+                                }
                             }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+                                visible: !shellState.weatherData.ok || barWindow.editingWeatherCity
+
+                                Text {
+                                    text: "CONFIGURE WEATHER LOCATION"
+                                    color: shellState.chartreuse
+                                    font.family: "Iosevka Nerd Font"
+                                    font.pixelSize: 8
+                                    font.bold: true
+                                    font.letterSpacing: 0.8
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    TextField {
+                                        id: weatherCityInput
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 30
+                                        placeholderText: "Enter city name (e.g. London, Tokyo, New York)..."
+                                        font.family: "Iosevka Nerd Font"
+                                        font.pixelSize: 9
+                                        color: shellState.text
+                                        placeholderTextColor: shellState.muted
+                                        background: Rectangle {
+                                            radius: 8
+                                            color: shellState.raised
+                                            border.color: shellState.edge
+                                            border.width: 1
+                                        }
+                                        Keys.onReturnPressed: {
+                                            if (text.trim().length > 0) {
+                                                shellState.saveWeatherCity(text.trim());
+                                                barWindow.editingWeatherCity = false;
+                                            }
+                                        }
+                                    }
+                                    Button {
+                                        text: "Set city"
+                                        Layout.preferredHeight: 30
+                                        background: Rectangle {
+                                            radius: 8
+                                            color: parent.down ? "#b8d54a" : shellState.chartreuse
+                                        }
+                                        contentItem: Text {
+                                            text: parent.text
+                                            color: shellState.ink
+                                            font.family: "Iosevka Nerd Font"
+                                            font.pixelSize: 9
+                                            font.bold: true
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
+                                            padding: 6
+                                        }
+                                        onClicked: {
+                                            if (weatherCityInput.text.trim().length > 0) {
+                                                shellState.saveWeatherCity(weatherCityInput.text.trim());
+                                                barWindow.editingWeatherCity = false;
+                                            }
+                                        }
+                                    }
+                                    Button {
+                                        visible: shellState.weatherData.ok && barWindow.editingWeatherCity
+                                        text: "Cancel"
+                                        Layout.preferredHeight: 30
+                                        background: Rectangle { radius: 8; color: shellState.raised }
+                                        contentItem: Text { text: parent.text; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 9; padding: 6; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                        onClicked: barWindow.editingWeatherCity = false
+                                    }
+                                }
+                                Text {
+                                    visible: !shellState.weatherData.ok
+                                    text: shellState.weatherData.message || "Set a city in Corvantium settings to enable weather."
+                                    color: shellState.muted
+                                    font.family: "Iosevka Nerd Font"
+                                    font.pixelSize: 8
+                                    wrapMode: Text.Wrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+                                visible: shellState.weatherData.ok && !barWindow.editingWeatherCity
+
+                                Text {
+                                    text: "NEXT HOURS"
+                                    color: shellState.muted
+                                    font.family: "Iosevka Nerd Font"
+                                    font.pixelSize: 8
+                                    font.letterSpacing: 0.8
+                                }
+                                ListView {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 88
+                                    orientation: ListView.Horizontal
+                                    spacing: 6
+                                    clip: true
+                                    model: shellState.weatherData.hourly || []
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        width: 70
+                                        height: 84
+                                        radius: 12
+                                        color: shellState.raised
+                                        border.color: shellState.edge
+                                        border.width: 1
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 5
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: barWindow.timeLabel(modelData.time)
+                                                color: shellState.muted
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: 8
+                                            }
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: Math.round(modelData.temperature) + (shellState.weatherData.unit || "°")
+                                                color: shellState.text
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: 13
+                                                font.bold: true
+                                            }
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: (modelData.precipitation_probability || 0) + "% rain"
+                                                color: shellState.violet
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: 8
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             RowLayout {
-                                Layout.fillWidth: true; Layout.fillHeight: true; spacing: 7
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 50
+                                spacing: 6
                                 Repeater {
                                     model: [
                                         { label: "WIND", value: shellState.weatherData.ok ? shellState.weatherData.current.wind_speed + " m/s" : "—" },
@@ -1172,20 +1492,43 @@ ShellRoot {
                                     ]
                                     delegate: Rectangle {
                                         required property var modelData
-                                        Layout.fillWidth: true; Layout.fillHeight: true; radius: 14; color: shellState.raised
-                                        Column {
-                                            anchors.centerIn: parent; spacing: 5
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: shellState.muted; font.family: "Iosevka Nerd Font"; font.pixelSize: 8 }
-                                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.value; color: shellState.text; font.family: "Iosevka Nerd Font"; font.pixelSize: 14; font.bold: true }
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 48
+                                        radius: 10
+                                        color: shellState.raised
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 3
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: modelData.label
+                                                color: shellState.muted
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: 7
+                                                font.letterSpacing: 0.6
+                                            }
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: modelData.value
+                                                color: shellState.text
+                                                font.family: "Iosevka Nerd Font"
+                                                font.pixelSize: 12
+                                                font.bold: true
+                                            }
                                         }
                                     }
                                 }
                             }
+
                             Text {
-                                text: shellState.weatherData.show_weather === false ? "Weather is disabled in Corvantium settings." : (shellState.weatherData.ok && shellState.weatherData.stale ? "Cached city forecast · " : "City opt-in · ") + "No GPS lookup · <a href='https://open-meteo.com/'>Open-Meteo data · CC BY 4.0</a>"
+                                text: shellState.weatherData.show_weather === false
+                                    ? "Weather is disabled in Corvantium settings."
+                                    : (shellState.weatherData.ok && shellState.weatherData.stale ? "Cached city forecast · " : "City opt-in · ") + "No GPS lookup · <a href='https://open-meteo.com/'>Open-Meteo data · CC BY 4.0</a>"
                                 textFormat: Text.RichText
-                                color: "#736b85"; linkColor: shellState.violet
-                                font.family: "Iosevka Nerd Font"; font.pixelSize: 8
+                                color: "#736b85"
+                                linkColor: shellState.violet
+                                font.family: "Iosevka Nerd Font"
+                                font.pixelSize: 8
                                 onLinkActivated: launcherForWeather.exec([Quickshell.shellDir + "/../scripts/corvantium-launch", "browser", link])
                             }
                         }
@@ -1203,7 +1546,7 @@ ShellRoot {
                 anchor.margins.bottom: 0
                 implicitWidth: Math.min(320, Math.max(280, barWindow.screen.width - 24))
                 implicitHeight: Math.min(360, barWindow.screen.height - 48)
-                visible: barWindow.openPanel === "bluetooth"
+                visible: barWindow.openPanel === "bluetooth" && barWindow.isCurrentScreen
                 grabFocus: visible
                 onVisibleChanged: if (!visible) barWindow.closePanel("bluetooth")
                 FluidPanel {
@@ -1317,8 +1660,8 @@ ShellRoot {
                 anchor.gravity: Edges.Bottom | Edges.HCenter
                 anchor.margins.bottom: 0
                 implicitWidth: 300; implicitHeight: 270
-                visible: barWindow.openPanel === "settings"
-                grabFocus: barWindow.openPanel === "settings"
+                visible: barWindow.openPanel === "settings" && barWindow.isCurrentScreen
+                grabFocus: visible
                 onVisibleChanged: if (!visible) barWindow.closePanel("settings")
                 FluidPanel {
                     anchors.fill: parent
@@ -1414,7 +1757,7 @@ ShellRoot {
                                 onClicked: {
                                     shellState.overlayOpen = false;
                                     if (modelData.action === "screen-search" || modelData.action === "music-identify" || modelData.action === "wallpaper") shellState.launchAction(modelData.action);
-                                    else shellState.requestedPanel = modelData.action;
+                                    else shellState.openPanelOnFocusedScreen(modelData.action);
                                 }
                                 background: Rectangle { radius: 12; color: parent.down ? "#35454a" : "#851a2327"; border.color: "#557b969a"; border.width: 1 }
                                 contentItem: ColumnLayout {

@@ -61,10 +61,20 @@ case "${1:-}" in
         exit 1
         ;;
     search)
+        if pidof fuzzel >/dev/null 2>&1; then killall fuzzel; exit 0; fi
+        if pidof wofi >/dev/null 2>&1; then killall wofi; exit 0; fi
+        if pidof rofi >/dev/null 2>&1; then killall rofi; exit 0; fi
         app="$(configured_app launcher fuzzel wofi rofi || true)"
         case "${app##*/}" in
             "") notice 'Install fuzzel, wofi, or rofi for application search.' ;;
-            fuzzel) exec "$app" ;;
+            fuzzel)
+                fuzzel_config="${CORVANTIUM_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/corvantium}/launcher/fuzzel.ini"
+                if [[ ! -f "$fuzzel_config" ]]; then
+                    script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+                    if [[ -f "$script_root/launcher/fuzzel.ini" ]]; then fuzzel_config="$script_root/launcher/fuzzel.ini"; fi
+                fi
+                if [[ -f "$fuzzel_config" ]]; then exec "$app" --config "$fuzzel_config"; else exec "$app"; fi
+                ;;
             wofi) exec "$app" --show drun ;;
             rofi) exec "$app" -show drun ;;
             *) exec "$app" ;;

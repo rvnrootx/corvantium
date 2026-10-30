@@ -81,12 +81,38 @@ def emit(payload: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--set-location", default=None, help="Configure a new weather location")
     args = parser.parse_args()
+    config_path = Path(args.config)
     try:
-        settings = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        settings = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         settings = {}
-    location = str(settings.get("weather_location", "")).strip()
+
+    if args.set_location is not None:
+        location = args.set_location.strip()
+        settings["weather_location"] = location
+        try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = config_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(config_path)
+        except OSError:
+            pass
+    else:
+        location = str(settings.get("weather_location", "")).strip()
+        if not location:
+            config_candidate = Path(os.environ.get("CORVANTIUM_CONFIG_HOME", str(Path.home() / ".config" / "corvantium"))) / "shell" / "settings.json"
+            try:
+                if config_candidate.resolve() != config_path.resolve() and config_candidate.is_file():
+                    fallback_settings = json.loads(config_candidate.read_text(encoding="utf-8"))
+                    fallback_loc = str(fallback_settings.get("weather_location", "")).strip()
+                    if fallback_loc:
+                        location = fallback_loc
+                        if "temperature_unit" in fallback_settings and "temperature_unit" not in settings:
+                            settings["temperature_unit"] = fallback_settings["temperature_unit"]
+            except (OSError, json.JSONDecodeError):
+                pass
     time_format = "12h" if settings.get("time_format") == "12h" else "24h"
     show_weather = settings.get("show_weather", True) is not False
     try:
